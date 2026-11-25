@@ -24,6 +24,7 @@
 #   fm-fleet-ledger.sh pr_ready <task> <url>
 #   fm-fleet-ledger.sh merged <task> pr <url>
 #   fm-fleet-ledger.sh merged <task> local
+#   fm-fleet-ledger.sh closed <task> pr <url>     (a PR declined without merging)
 #   fm-fleet-ledger.sh cleaned_up <task>
 #   fm-fleet-ledger.sh capture
 #   fm-fleet-ledger.sh appended <config> <state>/<task>.status
@@ -65,7 +66,7 @@ LOCK="$STATE/.fleet-ledger.lock"
 TEXT_MAX_CHARS=2000
 
 usage() {
-  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <config> <state>/<task>.status" >&2
+  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | closed <task> pr <url> | cleaned_up <task> | capture | appended <config> <state>/<task>.status" >&2
   exit 2
 }
 
@@ -81,6 +82,7 @@ case "$cmd" in
     task_ok "${2:-}" || usage
     case "$#:${3:-}" in 4:pr) [ -n "$4" ] || usage ;; 3:local) ;; *) usage ;; esac
     ;;
+  closed) { [ "$#" -eq 4 ] && task_ok "$2" && [ "$3" = pr ] && [ -n "$4" ]; } || usage ;;
   cleaned_up) { [ "$#" -eq 2 ] && task_ok "$2"; } || usage ;;
   capture) [ "$#" -eq 1 ] || usage ;;
   appended)
@@ -224,9 +226,16 @@ case "$cmd" in
       append task.merged "$2" '{via: "local"}' || rc=1
     fi
     ;;
+  closed)
+    capture_task "$2" || rc=1
+    append task.closed "$2" '{via: "pr", pr: $pr}' --arg pr "$4" || rc=1
+    ;;
   cleaned_up)
     capture_task "$2" || rc=1
-    append task.cleaned_up "$2" '{}' || rc=1
+    # Carry the task's PR link into the record: the task meta is gone after teardown.
+    pr=$(grep -E '^(bb_pr|pr)=' "$STATE/$2.meta" 2>/dev/null | head -n 1)
+    pr=${pr#*=}
+    append task.cleaned_up "$2" '(if $pr == "" then {} else {pr: $pr} end)' --arg pr "$pr" || rc=1
     [ "$rc" -ne 0 ] || rm -f -- "$(offset_path "$2")"
     ;;
 esac

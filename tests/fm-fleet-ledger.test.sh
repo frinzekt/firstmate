@@ -288,7 +288,24 @@ test_flag_off_writes_nothing() {
   pass "flag off: the whole lifecycle leaves no ledger file, offset, or lock"
 }
 
+test_closed_pr_and_cleanup_carry_the_pr_link() {
+  local url=https://bitbucket.org/acme/sample/pull-requests/9 rows
+  make_case on-closed on
+  printf 'bb_pr=%s\n' "$url" > "$HOME_DIR/state/$TASK.meta"
+  in_home "$ROOT/bin/fm-fleet-ledger.sh" closed "$TASK" pr "$url" || fail "closed was not recorded"
+  in_home "$ROOT/bin/fm-fleet-ledger.sh" cleaned_up "$TASK" || fail "cleaned_up was not recorded"
+  in_home "$ROOT/bin/fm-fleet-ledger.sh" closed "$TASK" "$url" 2>/dev/null && fail "closed accepted a missing pr keyword"
+  rows=$(ledger_rows '[.event, .via, .pr]')
+  assert_equals "$(cat <<EOF
+["task.closed","pr","$url"]
+["task.cleaned_up",null,"$url"]
+EOF
+)" "$rows" "closed and cleaned_up rows"
+  pass "a declined PR is recorded as task.closed and cleanup carries the PR link from the task meta"
+}
+
 test_flag_on_records_the_task_lifecycle
+test_closed_pr_and_cleanup_carry_the_pr_link
 test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration
 test_worker_status_line_is_recorded_when_written
