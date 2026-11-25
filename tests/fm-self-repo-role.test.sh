@@ -715,6 +715,158 @@ test_secondmate_spawn_refuses_consent_flag() {
   pass "fm-spawn.sh: --upstream-consent is refused on secondmate charters"
 }
 
+# --- own-fork publication targets (config/firstmate-fork-targets) ------------
+
+# write_fork_targets <home> <content> - the home's own-fork file.
+write_fork_targets() {
+  printf '%s\n' "$2" > "$1/config/firstmate-fork-targets"
+}
+
+# make_fork_clone <name> - a clone sharing this checkout's lineage whose origin
+# is the operator's fork and whose upstream is the parent, both with real push
+# URLs, so only the own-fork rules decide. Echoes its path.
+make_fork_clone() {
+  local clone
+  clone=$(clone_with_origin "$ROOT" "$1" https://github.com/someone/firstmate-fork.git)
+  git -C "$clone" remote remove upstream 2>/dev/null || true
+  git -C "$clone" remote add upstream https://github.com/kunchenguid/firstmate
+  printf '%s\n' "$clone"
+}
+
+test_check_own_fork_allows_only_the_listed_fork() {
+  local root home out rc
+  root=$(make_lineage_root ownfork-root https://github.com/someone/firstmate-fork.git)
+  git -C "$root" remote add upstream https://github.com/kunchenguid/firstmate
+  home=$(make_role_home ownfork-allowed)
+
+  out=$(check_as "$root" "$home" "$root"); rc=$?
+  expect_code 1 "$rc" "without an own-fork file the parent stays the refused target (got: $out)"
+
+  write_fork_targets "$home" "$(printf '# own fork\nfork GitHub.com/Someone/FirstMate-Fork base captain')"
+  out=$(check_as "$root" "$home" "$root" base-branch captain); rc=$?
+  expect_code 0 "$rc" "a listed fork with a matching remote and base must authorize (got: $out)"
+  assert_contains "$out" "authorized: own fork github.com/someone/firstmate-fork through remote origin" \
+    "the authority must name the fork and the remote the contract pins"
+
+  out=$(check_as "$root" "$home" "$root"); rc=$?
+  expect_code 1 "$rc" "a fork entry naming a base must refuse a default-base task (got: $out)"
+  assert_contains "$out" "pass --base-branch captain" "the refusal must name the required base"
+  out=$(check_as "$root" "$home" "$root" base-branch main); rc=$?
+  expect_code 1 "$rc" "a fork entry naming a base must refuse another base (got: $out)"
+
+  git -C "$root" remote rename origin mine
+  out=$(check_as "$root" "$home" "$root" base-branch captain); rc=$?
+  expect_code 0 "$rc" "the fork remote is matched by URL, not by name (got: $out)"
+  assert_contains "$out" "through remote mine" "the pinned remote must be the one whose URL matched"
+
+  git -C "$root" remote set-url --push mine https://github.com/kunchenguid/firstmate
+  out=$(check_as "$root" "$home" "$root" base-branch captain); rc=$?
+  expect_code 1 "$rc" "a fork remote that pushes elsewhere must not authorize (got: $out)"
+  assert_contains "$out" "no remote of" "the refusal must name the missing fork remote"
+  pass "fm-role.sh check: an own-fork entry authorizes exactly its fork remote and base"
+}
+
+test_check_own_fork_refuses_upstream_and_unknown_repos() {
+  local root home out rc
+  root=$(make_lineage_root ownfork-refuse-root https://github.com/someone/firstmate-fork.git)
+  git -C "$root" remote add upstream https://github.com/kunchenguid/firstmate
+  home=$(make_role_home ownfork-refuse)
+
+  write_fork_targets "$home" 'fork github.com/kunchenguid/firstmate'
+  out=$(check_as "$root" "$home" "$root"); rc=$?
+  expect_code 1 "$rc" "listing the parent upstream as a fork must not authorize it (got: $out)"
+  assert_contains "$out" "default publication target" "the refusal must say the parent is not an own-fork target"
+  assert_not_contains "$out" "authorized" "the parent must never be authorized through the own-fork file"
+
+  write_fork_targets "$home" 'fork github.com/stranger/firstmate'
+  out=$(check_as "$root" "$home" "$root"); rc=$?
+  expect_code 1 "$rc" "a listed fork with no matching remote must not authorize (got: $out)"
+  assert_contains "$out" "no remote of" "the refusal must name the missing fork remote"
+
+  git -C "$root" remote add stranger "$TMP_ROOT/stranger-local"
+  write_fork_targets "$home" "fork github.com/stranger/firstmate"
+  out=$(check_as "$root" "$home" "$root"); rc=$?
+  expect_code 1 "$rc" "a local-path remote must never stand in for a fork (got: $out)"
+
+  write_fork_targets "$home" 'fork github.com/someone/firstmate-fork extra'
+  out=$(check_as "$root" "$home" "$root"); rc=$?
+  expect_code 1 "$rc" "a malformed own-fork line must void the file (got: $out)"
+  assert_contains "$out" "malformed own-fork file" "the refusal must name the malformed file"
+
+  write_fork_targets "$home" 'fork github.com/someone/firstmate-fork'
+  touch "$home/.fm-secondmate-home"
+  out=$(check_as "$root" "$home" "$root"); rc=$?
+  expect_code 1 "$rc" "a secondmate home must not honor an unpropagated own-fork file (got: $out)"
+  assert_contains "$out" "not propagated to secondmate homes" "the refusal must name the secondmate boundary"
+  pass "fm-role.sh check: the own-fork file never covers upstream, unknown, local, malformed, or secondmate cases"
+}
+
+test_dod_block_renders_own_fork_pin() {
+  local out rc
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-dod-lib.sh"
+  out=$(fm_dod_block direct-PR fork-id fm/fork-id none captain '' auto github.com/someone/firstmate-fork mine)
+  assert_contains "$out" "Delivery contract: mode=direct-PR publish-target=github.com/someone/firstmate-fork" \
+    "a pinned contract must record the publication target token"
+  assert_contains "$out" "Push only to \`mine\`" "a pinned contract must confine pushes to the fork remote"
+  assert_contains "$out" "--repo someone/firstmate-fork" "a pinned contract must confine PR commands to the fork"
+  assert_contains "$out" "\`--base captain\`" "a pinned contract must keep the task's base branch"
+  out=$(fm_dod_block local-only fork-id fm/fork-id none '' '' auto github.com/someone/firstmate-fork mine 2>&1); rc=$?
+  expect_code 1 "$rc" "local-only must refuse an own-fork pin"
+  out=$(fm_dod_block direct-PR fork-id fm/fork-id none '' '' auto github.com/someone/firstmate-fork 2>&1); rc=$?
+  expect_code 1 "$rc" "a pin without its remote must refuse"
+  pass "fm_dod_block: an own-fork pin renders its token and push and PR confinement"
+}
+
+test_brief_spawn_promote_carry_own_fork_pin() {
+  local home clone out rc meta
+  home=$(make_role_home ownfork-flow)
+  clone=$(make_fork_clone ownfork-flow-clone)
+  write_fork_targets "$home" 'fork github.com/someone/firstmate-fork'
+
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_DATA_OVERRIDE="$home/data" \
+    "$BRIEF" ownfork-b1 some-proj --mode direct-PR --project "$clone" 2>&1); rc=$?
+  expect_code 0 "$rc" "an own-fork home must scaffold a self-repo publishing brief (got: $out)"
+  assert_grep "publish-target=github.com/someone/firstmate-fork" "$home/data/ownfork-b1/brief.md" \
+    "the scaffolded brief must pin the fork"
+  assert_grep "Push only to \`origin\`" "$home/data/ownfork-b1/brief.md" \
+    "the scaffolded brief must name the fork remote"
+
+  write_ship_brief "$home" ownfork-s1
+  rc=0
+  out=$(run_spawn "$home" ownfork-s1 "$clone" claude --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a brief without the fork pin must refuse under own-fork authority"
+  assert_contains "$out" "publish-target mismatch for ownfork-s1" "an unpinned brief must be reported as a mismatch"
+  assert_absent "$home/state/ownfork-s1.meta" "a mismatched spawn must write no metadata"
+
+  write_ship_brief "$home" ownfork-s2 " publish-target=github.com/someone/firstmate-fork"
+  out=$(run_spawn "$home" ownfork-s2 "$clone" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "spawn refused" "a pinned brief must pass the gate"
+  assert_not_contains "$out" "publish-target mismatch" "a pinned brief must agree with the gate"
+
+  local user_home
+  user_home=$(make_role_home ownfork-flow-user)
+  write_ship_brief "$user_home" ownfork-s3 " publish-target=github.com/someone/firstmate-fork"
+  rc=0
+  out=$(run_spawn "$user_home" ownfork-s3 "$clone" claude --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pinned brief must not launch from a home with no own-fork file"
+  assert_contains "$out" "spawn refused for ownfork-s3" "a home with no own-fork file keeps refusing"
+
+  meta="$home/state/ownfork-r1.meta"
+  printf 'window=fm-ownfork-r1\nkind=scout\nproject=%s\nworktree=/tmp/wt\n' "$clone" > "$meta"
+  mkdir -p "$home/data/ownfork-r1"
+  printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nInvestigate a firstmate bug.\n\n## Firstmate spec\nReport findings.\n' \
+    > "$home/data/ownfork-r1/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    "$PROMOTE" ownfork-r1 --mode direct-PR --yolo off 2>&1); rc=$?
+  expect_code 0 "$rc" "an own-fork home must promote a self-repo scout (got: $out)"
+  assert_grep 'publish_target=github.com/someone/firstmate-fork' "$meta" "the promoted record must carry the fork pin"
+  assert_grep "publish-target=github.com/someone/firstmate-fork" "$home/data/ownfork-r1/ship-instructions.md" \
+    "the promoted ship instructions must pin the fork"
+  pass "fm-brief.sh, fm-spawn.sh, fm-promote.sh: the own-fork pin is rendered, agreed, and recorded"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_report_default_and_local_grants
@@ -738,5 +890,9 @@ test_spawn_gate_on_self_repo
 test_spawn_consent_agreement
 test_promote_gate_on_self_repo
 test_secondmate_spawn_refuses_consent_flag
+test_check_own_fork_allows_only_the_listed_fork
+test_check_own_fork_refuses_upstream_and_unknown_repos
+test_dod_block_renders_own_fork_pin
+test_brief_spawn_promote_carry_own_fork_pin
 
 echo "# all fm-self-repo-role tests passed"

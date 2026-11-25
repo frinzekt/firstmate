@@ -786,6 +786,28 @@ Secondmate homes inherit the primary's resolved role, never its raw file: a prim
 In a secondmate home the file is honored only while the inheritance receipt `config/.fm-inherit-firstmate-role.generation` proves the exact bytes the primary last published (`bin/fm-config-inherit-lib.sh`); a role file with no matching receipt or a stale grant authorizes nothing.
 The receipt prevents accidental publication through supported paths; it proves consistency, not provenance, and is not a security boundary against a process that deliberately forges local records.
 
+### Own-fork publication targets (config/firstmate-fork-targets)
+
+The optional local, gitignored `config/firstmate-fork-targets` lists forks the operator owns as allowed publication targets, while the parent upstream stays refused.
+Each non-blank, non-`#` line is `fork <host>/<owner>/<repo>`, optionally followed by `base <branch>`; a malformed, unreadable, or symlinked file, or a repeated scope, authorizes nothing.
+
+```
+fork github.com/<you>/firstmate base <your-main-line>
+```
+
+A ship task on the firstmate repository that neither task consent nor a maintainer scope covers may publish under this file only when all of the following hold:
+
+- Exactly one listed fork matches exactly one project remote whose fetch URL and every push URL normalize to that fork; the remote is matched by URL, never by name, and a local-path remote never matches.
+- The matched fork is not the project's default publication target, which only a maintainer scope or task consent can cover.
+- When the entry names a base, the task passes that exact `--base-branch`; spawn starts the task from `origin/<branch>`, so that branch must exist on `origin`.
+
+The task's contract then records `publish-target=<scope>` on its `Delivery contract:` line and pins every push to the matched remote and every pull request command to that repository with `--repo`.
+`bin/fm-spawn.sh` refuses a brief whose `publish-target=` disagrees with its own gate result, so scaffold such a brief with `bin/fm-brief.sh --project <dir>` and the task's `--base-branch`; the task record keeps `publish_target=`.
+A no-mistakes task also needs the project's no-mistakes gate to push to the fork, which the worker confirms before its first run.
+Own-fork publication supports only projects without a forge override.
+The file is not propagated, so a secondmate home ignores it.
+`bin/fm-role.sh check <project-dir> [base-branch <branch>]` reports the result offline.
+
 ## Waiting worker spends no turns (config/wait-no-turns)
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.

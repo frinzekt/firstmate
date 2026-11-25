@@ -539,7 +539,51 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
+# The optional eighth and ninth arguments are the own-fork publication pin
+# bin/fm-role-lib.sh's gate returned (FM_ROLE_PUB_FORK, FM_ROLE_PUB_FORK_REMOTE):
+# both or neither. A pinned contract records ` publish-target=<scope>` on the
+# Delivery contract line, which bin/fm-spawn.sh checks against its own gate, and
+# a paragraph after the Ship branch line that confines every push and pull
+# request to that remote and repository. A pin is refused on local-only, which
+# publishes nothing, and on any forge other than none.
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<fork>] [<fork-remote>]
+  local fork=${8:-} fork_remote=${9:-} body repo
+  if [ -z "$fork" ] && [ -z "$fork_remote" ]; then
+    fm_dod_block_body "${@:1:7}"
+    return
+  fi
+  if [ -z "$fork" ] || [ -z "$fork_remote" ]; then
+    echo "error: fm_dod_block: an own-fork pin needs both the fork scope and its remote" >&2
+    return 1
+  fi
+  if [ "$1" = local-only ]; then
+    echo "error: fm_dod_block: an own-fork pin authorizes a publication that local-only never performs; drop it" >&2
+    return 1
+  fi
+  if [ "${4:-none}" != none ]; then
+    echo "error: fm_dod_block: own-fork publication is supported only with no forge override (got forge=${4})" >&2
+    return 1
+  fi
+  if [ -n "${6:-}" ]; then
+    echo "error: fm_dod_block: an own-fork pin and upstream consent are separate authorities; pass one" >&2
+    return 1
+  fi
+  body=$(fm_dod_block_body "${@:1:7}") || return 1
+  repo=${fork#*/}
+  FM_DOD_FORK_TOKEN=" publish-target=$fork" \
+    FM_DOD_FORK_TEXT="Publication target: \`$fork\`, this home's declared own fork, reached through the remote \`$fork_remote\`.
+Push only to \`$fork_remote\` (\`git push $fork_remote <branch>\`), and pass \`--repo $repo\` to every \`gh-axi pr\` command so the PR is opened, edited, read, and watched only on that repository.
+Never push to, open a PR on, comment on, or file an issue on any other repository, including firstmate's upstream.
+On a no-mistakes run, confirm with \`no-mistakes status\` before the first run that the pipeline pushes to \`$fork\`.
+If any command would reach another repository, append \`blocked [at=<epoch>]: publication target is not $fork\` and stop." \
+    awk '
+      /^Delivery contract: mode=/ && !c { print $0 ENVIRON["FM_DOD_FORK_TOKEN"]; c = 1; next }
+      /^Ship branch: / && !b { print; print ENVIRON["FM_DOD_FORK_TEXT"]; b = 1; next }
+      { print }
+    ' <<<"$body"
+}
+
+fm_dod_block_body() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1

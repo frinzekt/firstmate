@@ -33,7 +33,7 @@ A user/operator home that hits a firstmate bug does local work only:
 A local patch or workaround may touch the gitignored operational surface and a task's own worktree; nothing reaches upstream without the authority below.
 This posture covers firstmate self-repair exactly the same way it covers a dispatched task: the boundary is about publication, not about which surface holds the fix.
 
-## The two explicit grants
+## The explicit grants
 
 ### Maintainer opt-in (standing)
 
@@ -46,19 +46,24 @@ Consent renders as an `upstream-consent=` token on the brief's `Delivery contrac
 It changes the home's persistent role in no way; the next task is gated fresh.
 The captain's approval must be a current explicit instruction naming the contribution - never an inference from the task resembling maintainer work.
 
+### Own-fork publication target (standing, fork only)
+
+The operator may list a fork they own in `config/firstmate-fork-targets` so firstmate-repository work publishes to that fork while the parent upstream stays refused; follow the [own-fork schema and matching rules](../../../docs/configuration.md#own-fork-publication-targets-configfirstmate-fork-targets) rather than writing the file on the operator's behalf.
+A task authorized this way carries a `publish-target=` pin, so scaffold its brief with `--project` and any base the entry names as `--base-branch`.
+
 ## Where the boundary is enforced
 
 The gate is code, not memory: `bin/fm-role-lib.sh`'s `fm_role_gate_self_publish` applies the [lineage and publication-target policy](../../../docs/configuration.md#firstmate-role-configfirstmate-role) to publishing contracts.
 
 - `bin/fm-brief.sh --project <dir>` refuses to scaffold a publishing ship brief the home cannot authorize.
-- `bin/fm-spawn.sh` refuses to launch a ship task on this repository without a maintainer scope or matching task consent, and refuses a brief whose `upstream-consent=` disagrees with the flag.
+- `bin/fm-spawn.sh` refuses to launch a ship task on this repository without a maintainer scope, matching task consent, or a matching own-fork entry, and refuses a brief whose `upstream-consent=` disagrees with the flag or whose `publish-target=` disagrees with the gate.
 - `bin/fm-promote.sh` applies the same gate to scout promotion so the in-place path grants no more than a fresh spawn.
 - `local-only` publishes nothing, so it never needs authority and never takes consent.
 
 An authorized contribution then flows through the task's normal delivery contract - usually no-mistakes - like any other project; the grant answers only "may this publish", never "how".
 
-A gate refusal names the exact remedy: write `maintainer <scope>` into `config/firstmate-role`, or pass `--upstream-consent <scope>` for that one task with the captain's explicit approval.
-Never work around a refusal by pointing the task at a second checkout, fork, or parent clone; `fm_role_self_repo` treats every repository sharing firstmate's lineage as firstmate's own.
+A gate refusal names the exact remedy: write `maintainer <scope>` into `config/firstmate-role`, pass `--upstream-consent <scope>` for that one task with the captain's explicit approval, or list an owned fork in `config/firstmate-fork-targets`.
+Never work around a refusal by pointing the task at a second checkout, fork, or parent clone outside the own-fork rules; `fm_role_self_repo` treats every repository sharing firstmate's lineage as firstmate's own.
 
 ## Updating is not contributing
 

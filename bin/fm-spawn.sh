@@ -1020,6 +1020,7 @@ BASE_BRANCH=
 BASE_BRANCH_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
+PUBLISH_FORK=
 TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
@@ -4482,6 +4483,7 @@ if [ "$KIND" = ship ]; then
   # brief and the spawn flag must agree so the worker's contract and the task
   # record carry the same authority.
   BRIEF_CONSENT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_PUBLISH_TARGET=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]publish-target=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ "$BRIEF_CONSENT" != "$UPSTREAM_CONSENT" ]; then
     echo "error: upstream-consent mismatch for $ID: $BRIEF records upstream-consent=${BRIEF_CONSENT:-none} but this spawn passed ${UPSTREAM_CONSENT:-none}; correct the flag or re-scaffold the brief so the worker's contract and the task record agree" >&2
     exit 1
@@ -4558,20 +4560,26 @@ if [ "$KIND" = ship ]; then
   # Self-repository publication gate (bin/fm-role-lib.sh): a ship task whose
   # project is firstmate's own repository may launch a publishing contract only
   # under an explicit grant - this home's maintainer scope in
-  # config/firstmate-role, or this one task's recorded upstream consent. Every
-  # other project passes through unchanged; local-only publishes nothing and
-  # never reaches this gate.
+  # config/firstmate-role, this one task's recorded upstream consent, or an
+  # own fork listed in config/firstmate-fork-targets, whose pin the brief's
+  # publish-target= token must carry. Every other project passes through
+  # unchanged; local-only publishes nothing and never reaches this gate.
   if [ "$MODE" != local-only ]; then
     gate_rc=0
-    fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$PROJ_ABS" "$FM_ROOT" "$UPSTREAM_CONSENT" || gate_rc=$?
+    fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$PROJ_ABS" "$FM_ROOT" "$UPSTREAM_CONSENT" "$BASE_BRANCH" || gate_rc=$?
     case $gate_rc in
-    0 | 2) ;;
+    0) PUBLISH_FORK=$FM_ROLE_PUB_FORK ;;
+    2) ;;
     *)
       echo "error: spawn refused for $ID: $FM_ROLE_PUB_DENIAL" >&2
-      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval" >&2
+      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval; to publish only to a fork you own, list it as 'fork <host>/<owner>/<repo> [base <branch>]' in $CONFIG/firstmate-fork-targets" >&2
       exit 1
       ;;
     esac
+  fi
+  if [ "${BRIEF_PUBLISH_TARGET:-}" != "$PUBLISH_FORK" ]; then
+    echo "error: publish-target mismatch for $ID: $BRIEF records publish-target=${BRIEF_PUBLISH_TARGET:-none} but this home's own-fork authority for this task is ${PUBLISH_FORK:-none}; re-scaffold the brief with bin/fm-brief.sh --project <project-dir> (and the task's --base-branch) so the worker's contract pins the same publication target" >&2
+    exit 1
   fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
@@ -7392,6 +7400,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
+  [ -z "$PUBLISH_FORK" ] || echo "publish_target=$PUBLISH_FORK"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"

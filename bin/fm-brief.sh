@@ -100,8 +100,10 @@
 # delivery contract.
 # --project <dir> is the task's project directory, used to detect when a ship
 # brief would publish to firstmate's own repository: for such a task this
-# scaffold refuses a publishing mode that the home's role or recorded consent
-# does not authorize, before the contract exists. Pass it on every ship
+# scaffold refuses a publishing mode that the home's role, recorded consent, or
+# own-fork file does not authorize, before the contract exists. When the
+# own-fork file authorizes, the contract records ` publish-target=<scope>` and
+# pins every push and PR to that fork. Pass it on every ship
 # scaffold so detection does not depend on the caller recognizing the repo;
 # bin/fm-spawn.sh repeats the check at launch regardless.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -377,19 +379,26 @@ if [ "$UPSTREAM_CONSENT_SET" -eq 1 ]; then
 fi
 # Self-repository pre-gate for a publishing ship brief: detectable only when
 # --project was passed, so the check runs here only then. bin/fm-spawn.sh
-# repeats it at launch with the resolved project path.
+# repeats it at launch with the resolved project path. An own-fork grant
+# (config/firstmate-fork-targets) pins the contract to that fork.
+PUBLISH_FORK=
+PUBLISH_FORK_REMOTE=
 if [ "$KIND" = ship ] && [ "$MODE" != local-only ] && [ "$PROJECT_DIR_SET" -eq 1 ]; then
   [ -n "$PROJECT_DIR" ] || {
     echo "error: --project requires a non-empty directory" >&2
     exit 1
   }
   gate_rc=0
-  fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$PROJECT_DIR" "$FM_ROOT" "$UPSTREAM_CONSENT" || gate_rc=$?
+  fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$PROJECT_DIR" "$FM_ROOT" "$UPSTREAM_CONSENT" "$BASE_BRANCH" || gate_rc=$?
   case $gate_rc in
-    0 | 2) ;;
+    0)
+      PUBLISH_FORK=$FM_ROLE_PUB_FORK
+      PUBLISH_FORK_REMOTE=$FM_ROLE_PUB_FORK_REMOTE
+      ;;
+    2) ;;
     *)
       echo "error: $FM_ROLE_PUB_DENIAL" >&2
-      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval" >&2
+      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval; to publish only to a fork you own, list it as 'fork <host>/<owner>/<repo> [base <branch>]' in $CONFIG/firstmate-fork-targets" >&2
       exit 1
       ;;
   esac
@@ -775,7 +784,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT" "$PUBLISH_FORK" "$PUBLISH_FORK_REMOTE") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

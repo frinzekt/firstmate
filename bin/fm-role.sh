@@ -3,7 +3,7 @@
 #
 # Usage:
 #   bin/fm-role.sh report
-#   bin/fm-role.sh check <project-dir> [upstream-consent <scope>]
+#   bin/fm-role.sh check <project-dir> [upstream-consent <scope>] [base-branch <branch>]
 #
 #   report   prints one line: fm-role: <user|maintainer> [<scope>] (<source>)
 #            and, when a malformed or unverified input forced a closed result,
@@ -18,7 +18,9 @@
 #            not, and exits 2 with "not a self-repository task" when the task
 #            project is not firstmate's own repository (the boundary does not
 #            apply). The optional `upstream-consent <scope>` argument is the
-#            recorded per-task consent a dispatcher captured.
+#            recorded per-task consent a dispatcher captured, and the optional
+#            `base-branch <branch>` argument is the task's base branch, which
+#            an own-fork entry that names a base requires to match.
 #
 # bin/fm-role-lib.sh owns the schema summary and mechanics;
 # docs/configuration.md "Firstmate role" owns the operator-facing schema.
@@ -52,14 +54,25 @@ report)
 check)
   proj=${2:-}
   [ -n "$proj" ] || {
-    echo "usage: bin/fm-role.sh check <project-dir> [upstream-consent <scope>]" >&2
+    echo "usage: bin/fm-role.sh check <project-dir> [upstream-consent <scope>] [base-branch <branch>]" >&2
     exit 1
   }
   consent=
-  if [ "${3:-}" = upstream-consent ]; then
-    consent=${4:-}
-  fi
-  if fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$proj" "$FM_ROOT" "$consent"; then
+  base=
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case $1 in
+    upstream-consent) consent=${2:-} ;;
+    base-branch) base=${2:-} ;;
+    *)
+      echo "usage: bin/fm-role.sh check <project-dir> [upstream-consent <scope>] [base-branch <branch>]" >&2
+      exit 1
+      ;;
+    esac
+    shift
+    [ "$#" -eq 0 ] || shift
+  done
+  if fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$proj" "$FM_ROOT" "$consent" "$base"; then
     printf 'authorized: %s\n' "$FM_ROLE_PUB_AUTHORITY"
     exit 0
   else
@@ -73,10 +86,10 @@ check)
   exit 1
   ;;
 -h | --help | help)
-  sed -n '3,25p' "$0"
+  sed -n '3,26p' "$0"
   ;;
 *)
-  sed -n '3,25p' "$0" >&2
+  sed -n '3,26p' "$0" >&2
   exit 1
   ;;
 esac

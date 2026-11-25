@@ -43,8 +43,25 @@
 # is resolved one hop through that repository's own origin, and left as
 # path:<abs> when unreadable. An unknown target never permits.
 #
+# Own-fork file: config/firstmate-fork-targets (blank lines and full-line #
+# comments ignored) holds one directive per line,
+#   fork <host>/<owner>/<repo> [base <branch>]
+# naming a fork the operator owns as an allowed publication target. It never
+# widens the role: a self-repository task that neither consent nor maintainer
+# scope authorizes may publish under it only when exactly one listed fork
+# matches exactly one project remote whose fetch URL and every push URL
+# normalize to that fork (a local-path URL never matches), and, when the entry
+# names a base, only when the task's base branch is that base. An entry never
+# covers the project's default publication target (the repository that the
+# maintainer scope and task consent govern), so naming the parent upstream as a
+# fork authorizes nothing. The task's contract then pins every push and pull
+# request to that remote and repository. The file
+# is not propagated, so a secondmate home ignores it with a narrow diagnostic.
+#
 # Public functions:
 #   fm_role_file <config-dir>            - the role file path
+#   fm_role_fork_file <config-dir>       - the own-fork file path
+#   fm_role_parse_fork_file <file>       - sets FM_ROLE_FORKS/FM_ROLE_DIAG
 #   fm_role_scope_valid <scope>          - host/owner/repo[/subgroup] shape check
 #   fm_role_scope_norm <scope>           - canonical comparison form
 #   fm_role_remote_identity <url> [<dir>]- host/owner/repo or path:<abs> or empty
@@ -54,17 +71,24 @@
 #   fm_role_resolve <home> <config-dir>  - effective role; adds FM_ROLE_SOURCE
 #   fm_role_inherit_payload <home> <config-dir> <out-file>
 #                                        - stage the resolved role a parent publishes
-#   fm_role_gate_self_publish <home> <config> <project> <root> [consent]
+#   fm_role_gate_self_publish <home> <config> <project> <root> [consent] [base]
 #                                        - 0 authorized, 1 refused, 2 not self-repo
 #
 # Global outputs: FM_ROLE (user|maintainer), FM_ROLE_SCOPE (maintainer scope),
 # FM_ROLE_SOURCE (absent|local|inherited), FM_ROLE_DIAG (narrow refusal or
-# malformed-input reason), FM_ROLE_PUB_TARGET, FM_ROLE_PUB_AUTHORITY,
-# FM_ROLE_PUB_DENIAL.
+# malformed-input reason), FM_ROLE_FORKS (parsed own-fork entries, one
+# "<scope> <base-or-empty>" per line), FM_ROLE_PUB_TARGET,
+# FM_ROLE_PUB_AUTHORITY, FM_ROLE_PUB_DENIAL, FM_ROLE_PUB_FORK and
+# FM_ROLE_PUB_FORK_REMOTE (set only when an own-fork entry authorized).
 
 # fm_role_file <config-dir>
 fm_role_file() {
   printf '%s/firstmate-role\n' "${1%/}"
+}
+
+# fm_role_fork_file <config-dir>
+fm_role_fork_file() {
+  printf '%s/firstmate-fork-targets\n' "${1%/}"
 }
 
 # fm_role_inherit_receipt <config-dir> - receipt written by the inheritance
@@ -345,6 +369,143 @@ fm_role_parse_file() {
   return 0
 }
 
+# fm_role_parse_fork_file <file> - parse the own-fork file. Sets FM_ROLE_FORKS
+# (one "<scope> <base>" line per entry, base empty when none) and FM_ROLE_DIAG.
+# rc 0 valid; rc 1 malformed (FM_ROLE_FORKS empty); rc 2 absent. The whole file
+# is read before any entry is accepted, so one bad line voids the file.
+fm_role_parse_fork_file() {
+  local file=$1 line out='' scope base
+  FM_ROLE_FORKS=
+  FM_ROLE_DIAG=
+  if [ -L "$file" ]; then
+    FM_ROLE_DIAG="own-fork file must not be a symlink"
+    return 1
+  fi
+  if [ ! -f "$file" ]; then
+    FM_ROLE_DIAG="own-fork file is missing"
+    return 2
+  fi
+  if [ ! -r "$file" ]; then
+    FM_ROLE_DIAG="own-fork file is unreadable"
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#"${line%%[![:space:]]*}"}
+    case $line in
+    '' | '#'*) continue ;;
+    esac
+    set -f
+    # shellcheck disable=SC2086  # directive tokens are intentionally word-split
+    set -- $line
+    set +f
+    if [ "$1" != fork ]; then
+      FM_ROLE_DIAG="unknown own-fork directive '$1' (expected fork)"
+      return 1
+    fi
+    if [ "$#" -ne 2 ] && { [ "$#" -ne 4 ] || [ "$3" != base ]; }; then
+      FM_ROLE_DIAG="an own-fork line is 'fork <host>/<owner>/<repo> [base <branch>]'"
+      return 1
+    fi
+    if ! fm_role_scope_valid "$2"; then
+      FM_ROLE_DIAG="invalid own-fork repository scope '$2'"
+      return 1
+    fi
+    scope=$(fm_role_scope_norm "$2")
+    base=${4:-}
+    if [ -n "$base" ] && ! git check-ref-format --branch "$base" >/dev/null 2>&1; then
+      FM_ROLE_DIAG="invalid own-fork base branch '$base'"
+      return 1
+    fi
+    case "
+$out" in
+    *"
+$scope "*)
+      FM_ROLE_DIAG="own-fork scope '$scope' is listed more than once"
+      return 1
+      ;;
+    esac
+    out="$out$scope $base
+"
+  done <"$file"
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_ROLE_FORKS=$out
+  return 0
+}
+
+# fm_role_remotes_for_scope <git-dir> <scope> - names of the remotes whose
+# fetch URL and every push URL normalize to exactly <scope>, one per line.
+# Local-path URLs report path:<abs> and so never match a forge scope.
+fm_role_remotes_for_scope() {
+  local dir=$1 scope=$2 remote remotes url id ok
+  remotes=$(git -C "$dir" remote 2>/dev/null) || return 0
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    url=$(git -C "$dir" remote get-url "$remote" 2>/dev/null) || continue
+    id=$(fm_role_remote_identity "$url" "$dir" nolocal)
+    [ "$id" = "$scope" ] || continue
+    ok=1
+    while IFS= read -r url; do
+      id=$(fm_role_remote_identity "$url" "$dir" nolocal)
+      [ "$id" = "$scope" ] || ok=0
+    done < <(git -C "$dir" remote get-url --push --all "$remote" 2>/dev/null || printf 'unreadable\n')
+    [ "$ok" -eq 1 ] && printf '%s\n' "$remote"
+  done <<< "$remotes"
+}
+
+# fm_role_fork_authorize <home> <config-dir> <project-dir> <base> <default-target>
+# - evaluate the own-fork file for a self-repository task. rc 0 authorized (sets
+# FM_ROLE_PUB_FORK, FM_ROLE_PUB_FORK_REMOTE); rc 1 the file exists but
+# authorizes nothing here (FM_ROLE_DIAG names why); rc 2 no own-fork file.
+fm_role_fork_authorize() {
+  local home=$1 config=$2 proj=$3 base=$4 default_target=$5 file scope want remotes n matched='' matched_base='' matched_remote='' count=0 rc=0
+  file=$(fm_role_fork_file "$config")
+  [ -e "$file" ] || [ -L "$file" ] || return 2
+  if [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ]; then
+    FM_ROLE_DIAG="the own-fork file is not propagated to secondmate homes, so it authorizes nothing here"
+    return 1
+  fi
+  fm_role_parse_fork_file "$file" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    FM_ROLE_DIAG="malformed own-fork file: $FM_ROLE_DIAG"
+    return 1
+  fi
+  while read -r scope want; do
+    [ -n "$scope" ] || continue
+    remotes=$(fm_role_remotes_for_scope "$proj" "$scope")
+    [ -n "$remotes" ] || continue
+    n=$(printf '%s\n' "$remotes" | wc -l | tr -d '[:space:]')
+    if [ "$n" -ne 1 ]; then
+      FM_ROLE_DIAG="own fork $scope matches more than one remote of $proj ($(printf '%s' "$remotes" | tr '\n' ' ')), so the push remote is ambiguous"
+      return 1
+    fi
+    count=$((count + 1))
+    matched=$scope
+    matched_base=$want
+    matched_remote=$remotes
+  done <<< "$FM_ROLE_FORKS"
+  if [ "$count" -eq 0 ]; then
+    FM_ROLE_DIAG="no remote of $proj has a fetch URL and every push URL on a listed own fork"
+    return 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    FM_ROLE_DIAG="more than one listed own fork matches a remote of $proj, so the publication target is ambiguous"
+    return 1
+  fi
+  if [ "$matched" = "$default_target" ]; then
+    FM_ROLE_DIAG="$matched is this project's default publication target, which only a maintainer scope or task consent covers, not an own-fork entry"
+    return 1
+  fi
+  if [ -n "$matched_base" ] && [ "$base" != "$matched_base" ]; then
+    FM_ROLE_DIAG="own fork $matched publishes only against its base branch '$matched_base'; pass --base-branch $matched_base (got '${base:-the repository default}')"
+    return 1
+  fi
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_ROLE_PUB_FORK=$matched
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_ROLE_PUB_FORK_REMOTE=$matched_remote
+  return 0
+}
+
 # fm_role_sha256_stdin - hex digest of stdin on either digest tool.
 fm_role_sha256_stdin() {
   if command -v shasum >/dev/null 2>&1; then
@@ -490,15 +651,19 @@ fm_role_inherit_payload() (
   printf 'maintainer %s\n' "$FM_ROLE_SCOPE" >"$3"
 )
 
-# fm_role_gate_self_publish <home> <config-dir> <project-dir> <code-root> [consent]
+# fm_role_gate_self_publish <home> <config-dir> <project-dir> <code-root> [consent] [base]
 # Evaluate whether this home may run a publication contract for a task on
 # firstmate's own repository. rc 0 authorized (FM_ROLE_PUB_AUTHORITY names the
-# source: maintainer scope or task consent); rc 1 refused (FM_ROLE_PUB_DENIAL
-# names the narrow reason); rc 2 the task is not on this firstmate repository
-# and the boundary does not apply. FM_ROLE_PUB_TARGET is the normalized
-# publication target when determinable.
+# source: task consent, maintainer scope, or own fork; only the last also sets
+# FM_ROLE_PUB_FORK and FM_ROLE_PUB_FORK_REMOTE, which the contract must pin);
+# rc 1 refused (FM_ROLE_PUB_DENIAL names the narrow reason); rc 2 the task is
+# not on this firstmate repository and the boundary does not apply.
+# FM_ROLE_PUB_TARGET is the normalized default publication target when
+# determinable. [base] is the task's base branch, empty for the default.
 fm_role_gate_self_publish() {
-  local home=$1 config=$2 proj=$3 root=$4 consent=${5:-} lineage=0
+  local home=$1 config=$2 proj=$3 root=$4 consent=${5:-} base=${6:-} lineage=0 fork_rc=0 fork_note=''
+  FM_ROLE_PUB_FORK=
+  FM_ROLE_PUB_FORK_REMOTE=
   FM_ROLE_PUB_TARGET=
   # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_ROLE_PUB_AUTHORITY=
@@ -528,6 +693,17 @@ fm_role_gate_self_publish() {
     FM_ROLE_PUB_DENIAL="this task targets firstmate's own repository but no publication target can be determined (no upstream, github, or origin remote on $proj)"
     return 1
   fi
+  if [ -n "$consent" ] || { [ "$FM_ROLE" = maintainer ] && [ "$FM_ROLE_SCOPE" = "$FM_ROLE_PUB_TARGET" ]; }; then
+    :
+  else
+    fm_role_fork_authorize "$home" "$config" "$proj" "$base" "$FM_ROLE_PUB_TARGET" || fork_rc=$?
+    if [ "$fork_rc" -eq 0 ]; then
+      # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+      FM_ROLE_PUB_AUTHORITY="own fork $FM_ROLE_PUB_FORK through remote $FM_ROLE_PUB_FORK_REMOTE"
+      return 0
+    fi
+    [ "$fork_rc" -ne 1 ] || fork_note="; the own-fork file authorizes nothing here: $FM_ROLE_DIAG"
+  fi
   if [ -n "$consent" ] && [ "$consent" = "$FM_ROLE_PUB_TARGET" ]; then
     # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     FM_ROLE_PUB_AUTHORITY="task consent for $consent"
@@ -539,6 +715,6 @@ fm_role_gate_self_publish() {
     return 0
   fi
   # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
-  FM_ROLE_PUB_DENIAL="this home runs as firstmate user/operator and holds no publication authority for $FM_ROLE_PUB_TARGET"
+  FM_ROLE_PUB_DENIAL="this home runs as firstmate user/operator and holds no publication authority for $FM_ROLE_PUB_TARGET$fork_note"
   return 1
 }
