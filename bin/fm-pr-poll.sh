@@ -12,9 +12,10 @@
 # The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, and so does the GitLab degraded read (its
+# GitLab, gerrit-axi for Gerrit, tea for Forgejo, and twg for Bitbucket Cloud,
+# so an upstream checkout needs no extra tooling to follow GitHub or GitLab. The
+# Gerrit, Forgejo, and Bitbucket branches additionally need jq, and so does the
+# GitLab degraded read (its
 # rendered view carries no head pipeline state); without jq a GitLab poll
 # still wakes on a merge from the plain state field. A GitLab poll also emits
 # "ontrain" while the merge request has a merge-train car, and a degraded
@@ -550,6 +551,39 @@ case "$provider" in
         else error("invalid pull request record")
         end' 2>/dev/null) || exit $unknown
     [ "$merged" = true ] && printf '%s\n' merged
+    ;;
+  bitbucket)
+    # Bitbucket Cloud runs on bitbucket.org alone, so the host is a constant,
+    # and both slugs are lowercase by Bitbucket's own rule
+    # (bin/fm-pr-lib.sh fm_pr_bitbucket_segment_valid).
+    [ "$host" = bitbucket.org ] || exit 0
+    case "$path" in
+      */*/*|/*|*/) exit 0 ;;
+    esac
+    owner=${path%%/*}
+    repo=${path#*/}
+    [ "$owner" != "$path" ] || exit 0
+    for segment in "$owner" "$repo"; do
+      [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 100 ] || exit 0
+      case "$segment" in
+        .|..|-*|*.git|*[!a-z0-9._-]*) exit 0 ;;
+      esac
+    done
+    [ "$url" = "https://bitbucket.org/$owner/$repo/pull-requests/$number" ] || exit 0
+    command -v twg >/dev/null 2>&1 || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    # The workspace and repository are passed explicitly, because the watcher
+    # runs in no clone and twg would otherwise look for a local git remote.
+    # Only a record that is exactly this pull request with state MERGED wakes
+    # this poll; DECLINED, SUPERSEDED, and every unreadable answer stay silent.
+    state=$(twg bitbucket pull-requests get "$number" --workspace "$owner" --repo "$repo" \
+      -o json --output-summary none 2>/dev/null | jq -r --argjson n "$number" '
+        (if type == "array" and length == 1 then .[0] else . end)
+        | if type == "object" and .id == $n and (.state | type) == "string"
+          then .state
+          else error("invalid pull request record")
+          end' 2>/dev/null) || exit $unknown
+    [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

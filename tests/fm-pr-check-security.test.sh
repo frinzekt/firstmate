@@ -653,6 +653,25 @@ EOF
   do
     ! fm_pr_url_parse "$row" || fail "parser accepted a URL that must not resolve as forgejo: $row"
   done
+  fm_pr_url_parse https://bitbucket.org/my-ws/repo.name_x-1/pull-requests/42 \
+    || fail "parser rejected a canonical Bitbucket Cloud pull request URL"
+  [ "$FM_PR_PROVIDER" = bitbucket ] || fail "parser did not tag a pull-requests URL as bitbucket"
+  [ "$FM_PR_HOST" = bitbucket.org ] && [ "$FM_PR_PATH" = my-ws/repo.name_x-1 ] \
+    && [ "$FM_PR_OWNER" = my-ws ] && [ "$FM_PR_REPO" = repo.name_x-1 ] && [ "$FM_PR_NUMBER" = 42 ] \
+    || fail "parser returned the wrong Bitbucket identity"
+  # Only bitbucket.org with lowercase slugs and a plain number is Bitbucket
+  # Cloud; a self-hosted host, uppercase, a leading zero, or a dash-led slug is
+  # refused rather than guessed.
+  for row in \
+    'https://bitbucket.example/ws/repo/pull-requests/1' \
+    'https://bitbucket.org/WS/repo/pull-requests/1' \
+    'https://bitbucket.org/ws/repo/pull-requests/01' \
+    'https://bitbucket.org/-ws/repo/pull-requests/1' \
+    'https://bitbucket.org/ws/repo.git/pull-requests/1' \
+    'https://bitbucket.org/ws/sub/repo/pull-requests/1'
+  do
+    ! fm_pr_url_parse "$row" || fail "parser accepted a URL that must not resolve as bitbucket: $row"
+  done
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
@@ -3678,6 +3697,47 @@ SH
   pass "Forgejo poll reads one pull request by number through tea api and wakes only on merged true"
 }
 
+# A Bitbucket Cloud pull request is followed by number through twg's JSON
+# output. Only a record for that exact pull request whose state is MERGED wakes
+# the poll; an open or declined record, a record for another pull request, and
+# a twg failure all stay silent.
+test_bitbucket_merge_watch() {
+  local dir state out url value
+  dir=$(make_case bitbucket-merge-watch)
+  state="$dir/home/state"
+  url=https://bitbucket.org/ws/repo/pull-requests/7
+  cat > "$dir/fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TWG_LOG"
+[ -z "${FM_TEST_TWG_FAIL:-}" ] || exit 1
+id=7
+[ -z "${FM_TEST_TWG_OTHER:-}" ] || id=8
+printf '{"id":%s,"state":"%s","source":{"commit":{"hash":"abcdefabcdef"}}}\n' "$id" "${FM_TEST_TWG_STATE:-OPEN}"
+SH
+  chmod +x "$dir/fakebin/twg"
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  : > "$dir/twg.log"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a bitbucket "$url" bitbucket.org ws/repo 7 "$POLL" \
+    || fail "could not prepare a Bitbucket poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Bitbucket poll"
+
+  for value in OPEN DECLINED; do
+    out=$(FM_TEST_TWG_LOG="$dir/twg.log" FM_TEST_TWG_STATE=$value run_poll "$dir")
+    [ -z "$out" ] || fail "Bitbucket poll emitted for a $value reading"
+  done
+  out=$(FM_TEST_TWG_LOG="$dir/twg.log" FM_TEST_TWG_STATE=MERGED FM_TEST_TWG_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted after a twg failure"
+  out=$(FM_TEST_TWG_LOG="$dir/twg.log" FM_TEST_TWG_STATE=MERGED FM_TEST_TWG_OTHER=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted for another pull request's record"
+  out=$(FM_TEST_TWG_LOG="$dir/twg.log" FM_TEST_TWG_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "Bitbucket poll did not emit exactly one merged line: '$out'"
+  grep -qF -- "bitbucket pull-requests get 7 --workspace ws --repo repo -o json --output-summary none" "$dir/twg.log" \
+    || fail "the poll did not read the one pull request by number in its workspace and repository"
+  pass "Bitbucket poll reads one pull request by number through twg and wakes only on MERGED"
+}
+
 # The one tea login for a Forgejo host is found by parsing
 # `tea login list --output json` as JSON, never by splitting each line on
 # quotes. The pretty-printed fixture below is byte-for-byte what tea 0.14.0
@@ -5668,6 +5728,7 @@ test_github_enterprise_hosts
 test_gitlab_merge_watch
 test_arming_baselines_an_already_degraded_change
 test_forgejo_merge_watch
+test_bitbucket_merge_watch
 test_forgejo_login_list_shapes
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision

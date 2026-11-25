@@ -7,7 +7,7 @@
 # is absent, so every existing installation keeps its current "fm/<task-id>"
 # branch names unchanged.
 # With --forge it prints one word instead: the project's registered forge,
-# none|gerrit|forgejo|external. The forge is asked for explicitly, so the
+# none|gerrit|forgejo|bitbucket|external. The forge is asked for explicitly, so the
 # default output stays the same two words for every project, bound or not.
 # With --pr it prints one word: the project's registered PR-text posture,
 # auto|manual, "auto" when the project registers none.
@@ -32,6 +32,7 @@
 #   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
+#   - <name> [<mode> forge=bitbucket] - <desc> (added <date>)        -> <mode> <yolo>, --forge bitbucket
 #   - <name> [direct-PR forge=external] - <desc> (added <date>)      -> direct-PR off, --forge external
 #   - <name> [no-mistakes pr=manual] - <desc> (added <date>)         -> no-mistakes off, --pr manual
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
@@ -64,7 +65,9 @@
 #   drives, `gerrit` means a Gerrit server: no pull requests, so the worker
 #   publishes a change with gerrit-axi instead, and `forgejo` means a Forgejo or
 #   Gitea server, whose pull requests the worker handles with tea rather than
-#   gh-axi, and `external` means the project's reviews are created by a review
+#   gh-axi, `bitbucket` means a Bitbucket Cloud repository on bitbucket.org,
+#   whose pull requests the worker handles with twg rather than gh-axi, and
+#   `external` means the project's reviews are created by a review
 #   tool that uploads its own snapshot of the worker's local commits: the
 #   worker never needs to push a branch, and must never push a task branch to
 #   the project's shared origin. Firstmate cannot observe, approve, or merge
@@ -75,8 +78,9 @@
 #   The binding is EXPLICIT because a provider family must never be guessed;
 #   bin/fm-forge-detect.sh proposes gerrit from a protocol fact at project-add
 #   intake, forgejo has no such fact and is proposed from the captain's own
-#   account of the host, external is never detected or proposed because no
-#   protocol fact identifies a snapshot-uploading review tool, and the captain's
+#   account of the host, bitbucket is confirmed the same way as forgejo,
+#   external is never detected or proposed because no protocol fact
+#   identifies a snapshot-uploading review tool, and the captain's
 #   confirmation is what this record holds.
 #   A forge describes what a mode publishes, so it composes with no-mistakes and
 #   direct-PR and is REFUSED on local-only, which publishes nothing: that mode
@@ -117,7 +121,7 @@
 # `pr` resolves as it did before the forge existed, and in the mode slot it
 # is read as an unknown mode. A key one or two edits from `forge` (such as
 # `forg=` or `Forge=`) is still ignored, with one stderr warning naming the token
-# and the forge=gerrit, forge=forgejo, and forge=external spellings. The one
+# and the forge=gerrit, forge=forgejo, forge=bitbucket, and forge=external spellings. The one
 # refusal is a malformed forge binding - a `forge=` token whose value is empty or outside the
 # closed set - which is REFUSED in the default and --forge output forms: nothing
 # on stdout, exit status 3, the token named. Resolving it to "no registered
@@ -233,7 +237,7 @@ fi
 posture=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
-    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=external" >&2 ;;
+    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, forge=bitbucket, or forge=external" >&2 ;;
     posture) posture=$rest ;;
   esac
 done <<EOF
@@ -257,12 +261,12 @@ if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
 fi
 
 case "$forge" in
-  none|forge=gerrit|forge=forgejo|forge=external) forge=${forge#forge=} ;;
+  none|forge=gerrit|forge=forgejo|forge=bitbucket|forge=external) forge=${forge#forge=} ;;
   forge=)
-    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, forge=bitbucket, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
   *)
-    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, forge=bitbucket, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
 esac
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then

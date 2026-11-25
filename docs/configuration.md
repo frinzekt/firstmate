@@ -915,7 +915,7 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 The optional local, gitignored `config/pr-squash-summary` presence flag opts this home into writing the commit text of the GitHub squash merges `bin/fm-pr-merge.sh` performs.
 With the flag present, a squash merge whose caller passed no subject or body of its own uses the PR title plus ` (#N)` as the commit subject and the PR body's `## What Changed` section as the commit body, so the commit on the base branch describes the change rather than listing every branch commit.
 The section is copied verbatim up to the next level-two heading, which leaves out the operator intent before it and the no-mistakes appendix and attestation after it.
-A PR body without that section, a PR whose text cannot be read, a merge method other than squash, and GitLab and Forgejo merges keep the repository's own squash text.
+A PR body without that section, a PR whose text cannot be read, a merge method other than squash, and GitLab, Forgejo, and Bitbucket merges keep the repository's own squash text.
 Only while the flag is present does it override the repository's own squash commit message setting; it is off by default, and with the file absent `bin/fm-pr-merge.sh` reads no PR text and sends the same merge command as before.
 The flag is a home-local preference, is not inherited by secondmate homes, and takes effect on the next merge.
 
@@ -2506,10 +2506,13 @@ It uses the same live secondmate discovery and propagation helper as bootstrap; 
 
 A project with no `forge=` token is served by the GitHub tooling, `gh` and `gh-axi`, exactly as before the token existed, and the token changes nothing for existing entries.
 A remote-backed project on a Forgejo or Gitea server is registered with `forge=forgejo`, one value of the same closed `forge=` binding that Gerrit uses; `bin/fm-project-mode.sh`'s header owns its grammar, values, and refusals, and `bin/fm-project-mode.sh --forge <name>` reads it back.
-Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`.
-The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
+Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`, and on `bitbucket` it names `twg bitbucket`.
+A project on Bitbucket Cloud is registered with `forge=bitbucket`, which composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, keeps `+yolo`, and is refused on `local-only`.
+The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, Forgejo, or Bitbucket Cloud PR/MR/change URL once one exists, regardless of this token.
 
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
+A Bitbucket Cloud project needs `twg` and `jq` on `PATH`, with `twg` logged in to Bitbucket; the merge watch, merge, and cleanup proof all read the pull request through `twg bitbucket`, and `bin/fm-pr-merge.sh`'s header owns its merge conditions.
+The optional review-time helpers in [`contrib/bitbucket/`](../contrib/bitbucket/README.md) add comment, conflict, and idle-park notifications for such a project.
 A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 

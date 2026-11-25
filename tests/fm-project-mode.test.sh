@@ -40,6 +40,9 @@ cat > "$DATA/projects.md" <<'EOF'
 - hand-forgejo [no-mistakes forge=forgejo pr=manual] - a bound forge (added 2026-01-01)
 - hand-empty [no-mistakes pr=] - an empty value (added 2026-01-01)
 - hand-auto [no-mistakes pr=auto] - auto is the absence of the token, not a value (added 2026-01-01)
+- bucket [direct-PR +yolo forge=bitbucket] - a Bitbucket Cloud repository (added 2026-01-01)
+- bucket-nm [forge=bitbucket no-mistakes] - forge token first on the pipeline mode (added 2026-01-01)
+- bucket-local [local-only forge=bitbucket] - a Bitbucket forge on a mode that publishes nothing (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -109,6 +112,23 @@ done
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" near-miss 2>&1 >/dev/null)
 assert_contains "$err" "forge=external" "the near-miss warning does not list forge=external"
 pass "fm-project-mode: forge=external binds direct-PR, reports yolo=off with a refusal, and is refused on local-only"
+
+[ "$(run_forge bucket)" = "bitbucket" ] || fail "forge=bitbucket did not resolve: $(run_forge bucket)"
+[ "$(run_mode bucket)" = "direct-PR on" ] || fail "forge=bitbucket must keep +yolo: $(run_mode bucket)"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" bucket 2>&1 >/dev/null)
+[ -z "$err" ] || fail "a registered forge=bitbucket warned or refused: $err"
+[ "$(run_forge bucket-nm)" = "bitbucket" ] || fail "forge=bitbucket before the mode token did not resolve: $(run_forge bucket-nm)"
+[ "$(run_mode bucket-nm)" = "no-mistakes off" ] || fail "forge=bitbucket displaced the mode: $(run_mode bucket-nm)"
+for flag in "" --forge; do
+  # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag bucket-local 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "local-only with forge=bitbucket did not refuse${flag:+ under $flag} (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused local-only bitbucket forge still handed the caller a posture: '$out'"
+done
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" glabbed 2>&1 >/dev/null) || true
+assert_contains "$err" 'forge=bitbucket' "the unknown-forge refusal did not name forge=bitbucket as an accepted value"
+pass "fm-project-mode: forge=bitbucket binds in any token order with either publishing mode, keeps +yolo, and is refused on local-only"
 
 [ "$(run_forge missing-project)" = "none" ] || fail "a missing project must default --forge to none: $(run_forge missing-project)"
 [ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --forge legacy 2>/dev/null)" = "none" ] \

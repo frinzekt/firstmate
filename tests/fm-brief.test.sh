@@ -288,14 +288,55 @@ test_forge_selection_renders_correct_cli() {
     assert_contains "$out" "$expect" "$label was refused without its reason"
     [ ! -e "$home/data/brief-forge-bad/brief.md" ] || fail "$label left a brief behind"
   done <<'ROWS'
-a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, or external
-the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, or external
+a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, bitbucket, or external
+the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, bitbucket, or external
 forgejo on local-only|--mode local-only --forge forgejo|cannot ship mode=local-only
 a shape on forgejo|--mode direct-PR --forge forgejo --shape squash|--shape applies only with --forge gerrit
 forgejo on a scout|--scout --forge forgejo|apply only to ship briefs
 ROWS
 
   pass "fm-brief.sh: --forge forgejo names tea in Rule 3, the direct-PR DOD, and the draft read-back, marks the delivery contract, and the closed set refuses everything else"
+}
+
+# --forge bitbucket is the Bitbucket Cloud value of the registered forge
+# binding. It names twg instead of gh-axi in the forge-CLI rule, in the
+# direct-PR open-a-PR line, and in the draft read-back of both publishing
+# modes, marks the delivery contract line, and is refused on local-only.
+test_forge_bitbucket_names_twg() {
+  local home brief out rc
+  home="$TMP_ROOT/forge-bitbucket-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bb-direct some-proj --mode direct-PR --forge bitbucket >/dev/null 2>&1 \
+    || fail "--forge bitbucket should scaffold a direct-PR ship brief"
+  brief="$home/data/brief-bb-direct/brief.md"
+  assert_grep "3. Use twg bitbucket for Bitbucket operations and chrome-devtools-axi for browser operations." "$brief" \
+    "--forge bitbucket must render the twg Rule 3 line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'open a PR with `twg bitbucket pull-requests create --workspace <workspace> --repo <repo> --source fm/brief-bb-direct' "$brief" \
+    "--forge bitbucket's direct-PR DOD must tell the worker to open the PR with twg from its ship branch"
+  grep -qx "Delivery contract: mode=direct-PR forge=bitbucket" "$brief" \
+    || fail "--forge bitbucket must mark the delivery contract line for the spawn's registry check"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'mark it ready with `twg bitbucket pull-requests update --pull-request <number> --workspace <workspace> --repo <repo> --ready`' "$brief" \
+    "--forge bitbucket's direct-PR DOD must clear a draft with twg"
+  assert_no_grep 'gh-axi pr' "$brief" \
+    "--forge bitbucket's DOD must not send the worker to gh-axi"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bb-nm some-proj --mode no-mistakes --forge bitbucket >/dev/null 2>&1 \
+    || fail "--forge bitbucket should scaffold a no-mistakes ship brief"
+  brief="$home/data/brief-bb-nm/brief.md"
+  grep -qx "Delivery contract: mode=no-mistakes forge=bitbucket" "$brief" \
+    || fail "a no-mistakes --forge bitbucket brief must mark the delivery contract line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'confirm it is not a draft (`twg bitbucket pull-requests get <number>' "$brief" \
+    "a no-mistakes --forge bitbucket DOD must read the draft state back with twg"
+  assert_no_grep 'gh-axi pr' "$brief" \
+    "a no-mistakes --forge bitbucket DOD must not send the worker to gh-axi"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bb-local some-proj --mode local-only --forge bitbucket 2>&1); rc=$?
+  expect_code 1 "$rc" "--forge bitbucket on local-only must be refused"
+  assert_contains "$out" "cannot ship mode=local-only" "the local-only refusal did not say why"
+  pass "fm-brief.sh: --forge bitbucket names twg in Rule 3, the direct-PR DOD, and the draft read-back, and marks the delivery contract"
 }
 
 # --forge external renders the external review rail from bin/fm-dod-lib.sh: a
@@ -1696,6 +1737,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_forge_selection_renders_correct_cli
+test_forge_bitbucket_names_twg
 test_forge_external_renders_the_review_rail
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

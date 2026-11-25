@@ -8,7 +8,9 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded; a Forgejo
 # pull request is addressed through tea by the derived owner and repository
-# plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
+# plus a "tea login" resolved fresh from the parsed host on every run; a
+# Bitbucket Cloud pull request is addressed through twg by the derived
+# workspace and repository on bitbucket.org. A Gerrit
 # change is refused outright: that adapter is read-only, and the refusal at the
 # parse below owns why.
 #
@@ -25,7 +27,10 @@
 # whose caller passed no subject or body takes the PR title and the body's
 # "## What Changed" section as its commit text; github_add_squash_summary owns it.
 # On Forgejo the merge style defaults to the repository's own
-# default_merge_style, read live, and a merge is refused when it cannot be read.
+# default_merge_style, read live, and a merge is refused when it cannot be read;
+# on Bitbucket it defaults to the destination branch's default_merge_strategy,
+# read live, refused when unreadable or outside the merge_commit, squash, and
+# fast_forward strategies twg can merge with.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
 # is open, not a draft, mergeable, free of conflicts, every unwaived check
@@ -180,6 +185,27 @@
 # argument beyond a merge method is refused rather than silently dropped,
 # because there is no established translation from a gh/glab-style flag into
 # a Forgejo API field yet.
+#
+# A Bitbucket Cloud merge is refused unless every pre-merge condition holds,
+# each read live through twg at merge time: the pull request is OPEN and not a
+# draft, its full head resolves from the abbreviated source hash Bitbucket
+# reports, at least one build status reported at that exact head and every
+# status there is SUCCESSFUL (a pending, failed, or stopped build refuses, and
+# so does a head no build has reported on), and Bitbucket's own mergeability
+# checks list nothing blocking, which covers its branch restrictions,
+# approvals, and conflicts; an unreadable answer refuses. Every failing
+# condition is reported, not just the first. twg's merge takes no head
+# binding, so the head is verified under the control lock immediately before
+# the merge and compared with the merged pull request's own head afterwards: a
+# drift is reported as an actionable mismatch rather than hidden. The merge
+# runs with --wait and is judged only by a follow-up read confirming state
+# MERGED; an unreadable read-back leaves the poll armed and records no landed
+# outcome. Extra arguments may only name a strategy (--squash, --merge, or
+# --method <merge_commit|squash|fast_forward>) or, under --attended-override,
+# --close-source-branch; --allow-red, --allow-missing, and --update-branch are
+# refused, and there is no queued or scheduled case. Reading and merging both
+# need twg and jq, and either one absent stops the merge before any state is
+# recorded.
 #
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
@@ -383,7 +409,8 @@ fi
 # --allow-red names one check run to waive, which only GitHub's per-check
 # reading can match. GitLab and Forgejo each collapse their checks into a
 # single head verdict - a head pipeline status and a combined commit status -
-# so there is no per-check name to waive there; GitLab's only waiver is the
+# so there is no per-check name to waive there, and a Bitbucket merge never
+# waives a build status at all; GitLab's only waiver is the
 # whole-pipeline absence --allow-no-pipeline covers. Refuse the combination
 # rather than accept a flag that would be silently dropped into a refusal the
 # caller cannot explain.
@@ -395,6 +422,10 @@ if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
       ;;
     forgejo)
       echo "error: --allow-red does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      exit 2
+      ;;
+    bitbucket)
+      echo "error: --allow-red does not apply to Bitbucket, where a merge requires every build status at the head to be SUCCESSFUL" >&2
       exit 2
       ;;
   esac
@@ -414,6 +445,10 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
       ;;
     forgejo)
       echo "error: --allow-missing does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      exit 2
+      ;;
+    bitbucket)
+      echo "error: --allow-missing does not apply to Bitbucket, where a merge requires at least one build status reported at the head" >&2
       exit 2
       ;;
   esac
@@ -727,11 +762,22 @@ if [ "$PROVIDER" = forgejo ]; then
     exit 1
   }
 fi
+BITBUCKET_MISSING=
+if [ "$PROVIDER" = bitbucket ]; then
+  command -v twg >/dev/null 2>&1 || BITBUCKET_MISSING="twg"
+  if ! command -v jq >/dev/null 2>&1; then
+    BITBUCKET_MISSING="${BITBUCKET_MISSING:+$BITBUCKET_MISSING and }jq"
+  fi
+  if [ -n "$BITBUCKET_MISSING" ]; then
+    echo "error: merging a Bitbucket pull request requires $BITBUCKET_MISSING on PATH" >&2
+    exit 1
+  fi
+fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
+if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ] || [ "$PROVIDER" = bitbucket ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -1049,6 +1095,219 @@ forgejo_default_merge_style() {
       return 1
       ;;
   esac
+}
+
+# Pre-merge conditions for a Bitbucket Cloud pull request, read live through
+# twg: one pull request record with its build statuses, and Bitbucket's own
+# mergeability checks. Sets FM_PR_MERGE_HEAD to the verified full head and
+# FM_PR_BITBUCKET_DEST to the destination branch on success, and returns
+# non-zero after reporting every condition that failed.
+FM_PR_BITBUCKET_DEST=
+bitbucket_verify_mergeable() {
+  local pr_json checks_json fields line refusals=''
+  local state='' draft='' live_head='' dest='' at_head='' not_green='' blocking=''
+
+  if ! pr_json=$(fm_pr_bitbucket_read_json "$PR_PATH" "$PR_NUMBER"); then
+    echo "error: could not read the Bitbucket pull request state before merging" >&2
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$pr_json" | jq -r "$FM_PR_BITBUCKET_JQ_DEFS"'
+      bb_head as $h
+      | "state=" + .state,
+        "draft=" + (.draft | tostring),
+        "head=" + $h,
+        "dest=" + ((.destination.branch.name // "") | tostring),
+        "at_head=" + ([bb_statuses[] | select((.commit.hash // "") == $h and $h != "")] | length | tostring),
+        "not_green=" + ([bb_statuses[]
+            | select((.commit.hash // "") == $h and $h != "" and .state != "SUCCESSFUL")
+            | ((.key // .name // "unnamed") | tostring) + " (" + ((.state // "unknown") | tostring) + ")"]
+          | join(", "))' 2>/dev/null); then
+    echo "error: could not read the Bitbucket pull request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      draft=*) draft=${line#draft=} ;;
+      head=*) live_head=${line#head=} ;;
+      dest=*) dest=${line#dest=} ;;
+      at_head=*) at_head=${line#at_head=} ;;
+      not_green=*) not_green=${line#not_green=} ;;
+    esac
+  done <<FIELDS
+$fields
+FIELDS
+
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not resolve the Bitbucket pull request head commit before merging" >&2
+    return 1
+  fi
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+  fi
+
+  # Bitbucket's own verdict on whether the merge may proceed: branch
+  # restrictions, approvals, conflicts, its standard build checks, and any
+  # custom pre-merge check. Every blocking entry refuses, and an unreadable
+  # answer refuses rather than being read as nothing blocking.
+  if ! checks_json=$(fm_pr_bitbucket_twg pull-requests mergeability "$PR_NUMBER" \
+      --workspace "$PR_OWNER" --repo "$PR_REPO") \
+    || ! blocking=$(printf '%s' "$checks_json" | jq -r '
+        if type == "array" then
+          .[] | select(type == "object" and .blocking == true)
+          | ((.check.name // .check.kind // .type // "unnamed check") | tostring)
+            + " is " + ((.status // "unknown") | tostring)
+            + (if (.message | type) == "string" and (.message | length) > 0
+               then ": " + (.message | split("\n")[0] | .[0:160]) else "" end)
+        else
+          error("mergeability is not a list")
+        end' 2>/dev/null); then
+    refusals="$refusals  - Bitbucket's mergeability checks could not be read
+"
+    blocking=
+  fi
+
+  [ "$state" = OPEN ] \
+    || refusals="$refusals  - state is \"${state:-unreadable}\", not OPEN
+"
+  # Only a positive draft reading refuses; Bitbucket's own state check above
+  # also blocks a draft server side.
+  [ "$draft" != true ] \
+    || refusals="$refusals  - the pull request is a draft
+"
+  # Green means at least one build status reported at the exact head and every
+  # status at that head SUCCESSFUL: a pending (INPROGRESS), failed, or stopped
+  # build refuses, and so does a head with no build status at all, which is
+  # unreported rather than nothing to check. Statuses on older commits of the
+  # branch are not the head's and are ignored.
+  case "$at_head" in
+    ''|*[!0-9]*|0)
+      refusals="$refusals  - no build status has reported at head $live_head
+"
+      ;;
+  esac
+  [ -z "$not_green" ] \
+    || refusals="$refusals  - build statuses at head $live_head are not SUCCESSFUL: $not_green
+"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    refusals="$refusals  - Bitbucket blocks the merge: $line
+"
+  done <<BLOCKING
+$blocking
+BLOCKING
+
+  note_expected_head "$live_head"
+  if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
+    refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
+"
+  fi
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  printf 'verified: %s is open with nothing blocking its merge and every build status SUCCESSFUL at head %s\n' \
+    "$URL" "$live_head" >&2
+  FM_PR_MERGE_HEAD=$live_head
+  FM_PR_BITBUCKET_DEST=$dest
+}
+
+# The pull request's live full head, or nothing when it cannot be resolved.
+bitbucket_live_head() {
+  local pr_json
+  pr_json=$(fm_pr_bitbucket_read_json "$PR_PATH" "$PR_NUMBER") || return 1
+  printf '%s' "$pr_json" | jq -r "$FM_PR_BITBUCKET_JQ_DEFS"' bb_head' 2>/dev/null
+}
+
+# The caller's own extra arguments may only name a merge strategy, in the forms
+# caller_merge_method reads, plus --close-source-branch under
+# --attended-override: closing the source branch is branch deletion, which
+# every forge path here refuses without that override. Anything else is refused
+# rather than silently dropped.
+FM_PR_BITBUCKET_CLOSE_SOURCE=false
+bitbucket_reject_unsupported_args() {
+  local arg pending=false
+  for arg in "$@"; do
+    if [ "$pending" = true ]; then
+      pending=false
+      continue
+    fi
+    case "$arg" in
+      --squash|--merge|--method=*) ;;
+      --method) pending=true ;;
+      --close-source-branch)
+        if [ "$ATTENDED_OVERRIDE" != true ]; then
+          echo "error: extra merge arguments must not request branch deletion; pass --attended-override only for an explicit captain instruction" >&2
+          return 1
+        fi
+        FM_PR_BITBUCKET_CLOSE_SOURCE=true
+        ;;
+      *)
+        echo "error: extra merge arguments other than a merge strategy are not supported for Bitbucket merges" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+# The twg merge strategy: the caller's own method when it named one, otherwise
+# the destination branch's default_merge_strategy, read live, so a repository
+# configured for squash is not sent the merge commit twg would otherwise
+# default to. twg merges with merge_commit, squash, or fast_forward only, so a
+# repository default outside that set, an unreadable default, and any other
+# caller method are refused rather than replaced by a strategy chosen here.
+bitbucket_merge_strategy() {
+  local method branches strategy
+  method=$(caller_merge_method "$@")
+  case "$method" in
+    '') ;;
+    squash) printf 'squash'; return 0 ;;
+    merge|merge_commit) printf 'merge_commit'; return 0 ;;
+    fast_forward) printf 'fast_forward'; return 0 ;;
+    *)
+      echo "error: refusing to merge $URL: Bitbucket merges through twg support only merge_commit, squash, or fast_forward, not \"$method\"" >&2
+      return 1
+      ;;
+  esac
+  strategy=
+  if [ -n "$FM_PR_BITBUCKET_DEST" ] \
+    && branches=$(fm_pr_bitbucket_twg branch query --workspace "$PR_OWNER" --repo "$PR_REPO" \
+      -q "$FM_PR_BITBUCKET_DEST" -n 100); then
+    strategy=$(printf '%s' "$branches" | jq -r --arg b "$FM_PR_BITBUCKET_DEST" '
+      if type == "array" then
+        [ .[] | select(type == "object" and .name == $b) | .default_merge_strategy ]
+        | if length == 1 and (.[0] | type) == "string" then .[0] else "" end
+      else "" end' 2>/dev/null) || strategy=
+  fi
+  case "$strategy" in
+    merge_commit|squash|fast_forward) printf '%s' "$strategy" ;;
+    '')
+      echo "error: refusing to merge $URL: the destination branch's default merge strategy could not be read; name one with --squash, --merge, or --method <merge_commit|squash|fast_forward>" >&2
+      return 1
+      ;;
+    *)
+      echo "error: refusing to merge $URL: the destination branch's default merge strategy is \"$strategy\", which twg cannot merge with; name one with --squash, --merge, or --method <merge_commit|squash|fast_forward>" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Reads the pull request back after the merge command. Returns 0 when it is
+# MERGED, 1 when it is readable and not merged, and 2 when it cannot be read.
+# FM_PR_BITBUCKET_MERGED_SOURCE is the merged pull request's own source hash,
+# which Bitbucket reports abbreviated.
+FM_PR_BITBUCKET_MERGED_SOURCE=
+bitbucket_confirm_merged() {
+  local json fields
+  FM_PR_BITBUCKET_MERGED_SOURCE=
+  json=$(fm_pr_bitbucket_read_json "$PR_PATH" "$PR_NUMBER") || return 2
+  fields=$(printf '%s' "$json" | jq -r "$FM_PR_BITBUCKET_JQ_DEFS"'
+    bb_pr | .state + " " + ((.source.commit.hash // "") | tostring)' 2>/dev/null) || return 2
+  FM_PR_BITBUCKET_MERGED_SOURCE=${fields#* }
+  [ "${fields%% *}" = MERGED ]
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
@@ -2021,6 +2280,96 @@ case "$PROVIDER" in
     fm_afk_contract_lock_release || true
     fm_lock_release "$MERGE_CONTROL_LOCK" || true
     MERGE_CONTROL_LOCK=
+    ;;
+  bitbucket)
+    bitbucket_reject_unsupported_args "$@" || exit 1
+    bitbucket_verify_mergeable || exit 1
+    bitbucket_strategy=$(bitbucket_merge_strategy "$@") || exit 1
+    # The away record is locked first, so this last presence and authority
+    # read and the forge command below share one live-owner critical section.
+    hold_away_record_for_merge || exit 1
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
+    # twg's merge takes no head binding, so the head is read once more as
+    # close to the merge as this script can get it; a push since the green
+    # verification refuses rather than merging commits nothing verified.
+    bitbucket_head_now=$(bitbucket_live_head) || bitbucket_head_now=
+    if [ "$bitbucket_head_now" != "$FM_PR_MERGE_HEAD" ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      printf 'error: refusing to merge %s: its head moved from the verified %s to %s; re-run once the new head is green\n' \
+        "$URL" "$FM_PR_MERGE_HEAD" "${bitbucket_head_now:-an unreadable head}" >&2
+      exit 1
+    fi
+    # The source branch is kept unless the caller closed it under
+    # --attended-override, overriding any close-source-branch flag the pull
+    # request itself carries, the same default every other path here keeps.
+    bitbucket_branch_arg=--keep-source-branch
+    [ "$FM_PR_BITBUCKET_CLOSE_SOURCE" != true ] || bitbucket_branch_arg=--close-source-branch
+    merge_status=0
+    merge_output=$(twg bitbucket pull-requests merge --pull-request "$PR_NUMBER" \
+      --workspace "$PR_OWNER" --repo "$PR_REPO" --merge-strategy "$bitbucket_strategy" \
+      "$bitbucket_branch_arg" --wait -o json --output-summary none 2>&1) || merge_status=$?
+    # Only a follow-up read showing state MERGED counts as landed. Only an
+    # unreadable read-back (status 2) is retried, a bounded number of times,
+    # so a transient read failure after a landed merge is not reported as
+    # unmerged; a definite reading of another state stops at once.
+    bitbucket_confirm_attempt=1
+    while :; do
+      bitbucket_confirm_rc=0
+      bitbucket_confirm_merged || bitbucket_confirm_rc=$?
+      [ "$bitbucket_confirm_rc" -eq 2 ] && [ "$bitbucket_confirm_attempt" -lt 5 ] || break
+      sleep 1
+      bitbucket_confirm_attempt=$((bitbucket_confirm_attempt + 1))
+    done
+    if [ "$bitbucket_confirm_rc" -eq 1 ]; then
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      [ -z "$merge_output" ] || printf 'error: > %s\n' "$merge_output" >&2
+      echo "error: Bitbucket did not confirm $URL as merged" >&2
+      [ "$merge_status" -eq 0 ] || exit "$merge_status"
+      exit 1
+    fi
+    if [ "$bitbucket_confirm_rc" -ne 0 ]; then
+      if [ "$merge_status" -ne 0 ]; then
+        fm_afk_contract_lock_release || true
+        fm_lock_release "$MERGE_CONTROL_LOCK" || true
+        MERGE_CONTROL_LOCK=
+        [ -z "$merge_output" ] || printf 'error: > %s\n' "$merge_output" >&2
+        echo "error: the Bitbucket merge of $URL failed and its state could not be read back" >&2
+        exit "$merge_status"
+      fi
+      # twg reported the merge accepted but its landed state is unreadable:
+      # the authority is kept, the poll stays armed, and no landed outcome
+      # is recorded, the same reading GitLab's unconfirmed merge gets above.
+      persist_accepted_merge_authority || exit 1
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      printf 'actionable: Bitbucket accepted the merge of %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+        "$URL" >&2
+      exit 0
+    fi
+    persist_accepted_merge_authority || exit 1
+    fm_afk_contract_lock_release || true
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    case "$FM_PR_BITBUCKET_MERGED_SOURCE" in
+      ????????*)
+        case "$FM_PR_MERGE_HEAD" in
+          "$FM_PR_BITBUCKET_MERGED_SOURCE"*) bitbucket_drift=false ;;
+          *) bitbucket_drift=true ;;
+        esac
+        ;;
+      *) bitbucket_drift=true ;;
+    esac
+    if [ "$bitbucket_drift" = true ]; then
+      printf 'actionable: merged %s, but its merged source commit %s is not the verified head %s; review what landed\n' \
+        "$URL" "${FM_PR_BITBUCKET_MERGED_SOURCE:-(unreadable)}" "$FM_PR_MERGE_HEAD" >&2
+    fi
     ;;
   *)
     echo "error: invalid PR merge request" >&2

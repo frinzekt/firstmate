@@ -1675,11 +1675,15 @@ pr_number_from_target() {
 }
 
 # GitLab serves a merge request's head as refs/merge-requests/<n>/head; GitHub
-# and Forgejo serve a pull request's as refs/pull/<n>/head.
+# and Forgejo serve a pull request's as refs/pull/<n>/head. Bitbucket Cloud
+# serves no pull request ref, so its head must already be a local object, as
+# it is when the worker pushed from this copy; otherwise the caller falls back
+# to the content check.
 ensure_commit_object() {
   local target=$1 commit=$2 n ref
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   case "$target" in
+    https://bitbucket.org/*/pull-requests/*) return 1 ;;
     *"/-/merge_requests/"*)
       n=${target##*/-/merge_requests/}
       n=${n%%[!0-9]*}
@@ -1733,7 +1737,8 @@ EOF
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
 # forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), a recorded GitLab merge request through glab
+# tea (fm_pr_forgejo_read_record), a recorded Bitbucket Cloud URL through twg
+# (fm_pr_bitbucket_read_record), a recorded GitLab merge request through glab
 # (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
 # squash or merge-train commit main received) when gitlab_mr_landing_opted_in,
 # and everything else through GitHub. Returns
@@ -1757,6 +1762,12 @@ pr_is_merged() {
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
     fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+    head=$FM_PR_RECORD_HEAD
+    fm_pr_head_valid "$head" || return 1
+    resolved_url=$FM_PR_URL
+  elif fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = bitbucket ]; then
+    fm_pr_bitbucket_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1

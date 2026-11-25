@@ -37,6 +37,15 @@ FJ_URL="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO/pulls/9"
 FJ_HEAD=cccccccccccccccccccccccccccccccccccccccc
 FJ_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
 
+# The Bitbucket Cloud fixture: bitbucket.org only, a workspace/repository
+# pair, and the "pull-requests" route. Bitbucket names a head by a 12-character
+# abbreviation, so the full head is resolved from the record's commits.
+BB_WS=fixture-ws
+BB_REPO=fixture-repo
+BB_URL="https://bitbucket.org/$BB_WS/$BB_REPO/pull-requests/5"
+BB_HEAD=abcdefabcdef1234567890abcdefabcdef123456
+BB_MOVED_HEAD=fedcbafedcba0987654321fedcbafedcba098765
+
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
@@ -5766,3 +5775,260 @@ test_squash_summary_falls_back_to_repository_default
 test_squash_summary_caller_commit_text_wins
 test_squash_summary_leaves_gitlab_and_forgejo_untouched
 test_squash_summary_ignores_headings_inside_code_fences
+
+# add_twg_mock <case_dir>: a twg stub answering from files in the case dir and
+# logging every call to twg.log. "pull-requests get" serves pr.json, or
+# pr-post.json once a merge was recorded, or pr-moved.json from the second read
+# on when that file exists; "mergeability" serves mergeability.json; "branch
+# query" serves branches.json; "merge" records its arguments and the merge
+# unless twg-merge-fails exists.
+add_twg_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+set -u
+dir=$(cd "$(dirname "$0")/.." && pwd)
+printf '%s\n' "$*" >> "$dir/twg.log"
+[ "${1:-}" = bitbucket ] || exit 2
+case "${2:-} ${3:-}" in
+  "pull-requests get")
+    n=$(cat "$dir/twg-get-count" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$dir/twg-get-count"
+    if [ -e "$dir/twg-merged" ]; then
+      cat "$dir/pr-post.json"
+    elif [ "$n" -gt 1 ] && [ -e "$dir/pr-moved.json" ]; then
+      cat "$dir/pr-moved.json"
+    else
+      cat "$dir/pr.json"
+    fi
+    ;;
+  "pull-requests mergeability") cat "$dir/mergeability.json" ;;
+  "branch query") cat "$dir/branches.json" ;;
+  "pull-requests merge")
+    printf '%s\n' "$*" > "$dir/twg-merge-args"
+    if [ -e "$dir/twg-merge-fails" ]; then
+      echo "Error: merge rejected" >&2
+      exit 1
+    fi
+    : > "$dir/twg-merged"
+    printf '{}\n'
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/twg"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+}
+
+# write_bitbucket_pr_json <file> [<field>=<value> ...]: one pull request record
+# with its build statuses, green by default. status=<STATE> sets the build at
+# the head, status_commit=<sha> moves that build to another commit, and
+# head=<sha> changes the head.
+write_bitbucket_pr_json() {
+  local file=$1 kv key value state=OPEN draft=false head=$BB_HEAD status=SUCCESSFUL status_commit=''
+  shift
+  for kv in "$@"; do
+    key=${kv%%=*}
+    value=${kv#*=}
+    case "$key" in
+      state) state=$value ;;
+      draft) draft=$value ;;
+      head) head=$value ;;
+      status) status=$value ;;
+      status_commit) status_commit=$value ;;
+      *) fail "write_bitbucket_pr_json: unknown field '$key'" ;;
+    esac
+  done
+  [ -n "$status_commit" ] || status_commit=$head
+  printf '{"id":5,"state":"%s","draft":%s,"source":{"branch":{"name":"fm/task-x1"},"commit":{"hash":"%s"}},"destination":{"branch":{"name":"main"}},"_commits":[{"hash":"%s"}],"_statuses":[{"key":"build","name":"build","state":"%s","commit":{"hash":"%s"}}]}\n' \
+    "$state" "$draft" "${head:0:12}" "$head" "$status" "$status_commit" > "$file"
+}
+
+# make_bitbucket_case <name> [<pr-field>=<value> ...]: a case dir with the twg
+# stub, a green pull request, nothing blocking its merge, and a destination
+# whose default strategy is squash. Echoes the case dir.
+make_bitbucket_case() {
+  local name=$1 case_dir
+  shift
+  case_dir=$(make_case "$name")
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  add_twg_mock "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/twg.log"
+  write_bitbucket_pr_json "$case_dir/pr.json" "$@"
+  write_bitbucket_pr_json "$case_dir/pr-post.json" state=MERGED
+  printf '[{"type":"standard","status":"PASSED","required":true,"blocking":false,"check":{"name":"Build"}}]\n' \
+    > "$case_dir/mergeability.json"
+  printf '[{"name":"main","default_merge_strategy":"squash"},{"name":"main-old","default_merge_strategy":"merge_commit"}]\n' \
+    > "$case_dir/branches.json"
+  printf '%s\n' "$case_dir"
+}
+
+run_bitbucket_merge() {  # <case_dir> <args>...
+  local case_dir=$1 rc
+  shift
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$BB_URL" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  return "$rc"
+}
+
+test_bitbucket_green_pull_request_merges_with_the_default_strategy() {
+  local case_dir rc=0
+  case_dir=$(make_bitbucket_case bitbucket-merges)
+  run_bitbucket_merge "$case_dir" || rc=$?
+  expect_code 0 "$rc" "bitbucket-merges: a green pull request should merge: $(cat "$case_dir/stderr")"
+  assert_grep "pr=$BB_URL" "$case_dir/state/task-x1.meta" \
+    "bitbucket-merges: pr= was not recorded before merging"
+  assert_grep "pull-requests merge --pull-request 5 --workspace $BB_WS --repo $BB_REPO --merge-strategy squash --keep-source-branch --wait" \
+    "$case_dir/twg-merge-args" "bitbucket-merges: the merge did not use the destination's default strategy and keep the branch"
+  assert_grep "every build status SUCCESSFUL at head $BB_HEAD" "$case_dir/stderr" \
+    "bitbucket-merges: the verified full head was not reported"
+  assert_no_grep 'not the verified head' "$case_dir/stderr" \
+    "bitbucket-merges: a merge of the verified head reported a drift"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "bitbucket-merges: a pull request reached the GitHub CLI"
+  pass "fm-pr-merge merges a green Bitbucket pull request through twg with the destination's default strategy"
+}
+
+test_bitbucket_each_condition_refuses_independently() {
+  local case_dir rc spec name field expected
+  for spec in \
+    "declined|state=DECLINED|state is \"DECLINED\", not OPEN" \
+    "draft|draft=true|the pull request is a draft" \
+    "failed|status=FAILED|build statuses at head $BB_HEAD are not SUCCESSFUL: build (FAILED)" \
+    "pending|status=INPROGRESS|build statuses at head $BB_HEAD are not SUCCESSFUL: build (INPROGRESS)" \
+    "stopped|status=STOPPED|build (STOPPED)" \
+    "unreported|status_commit=$BB_MOVED_HEAD|no build status has reported at head $BB_HEAD"; do
+    name=${spec%%|*}
+    field=${spec#*|}
+    expected=${field#*|}
+    field=${field%%|*}
+    case_dir=$(make_bitbucket_case "bitbucket-refuse-$name" "$field")
+    rc=0
+    run_bitbucket_merge "$case_dir" || rc=$?
+    expect_code 1 "$rc" "bitbucket-refuse-$name: fm-pr-merge should refuse"
+    assert_grep "error: refusing to merge $BB_URL" "$case_dir/stderr" \
+      "bitbucket-refuse-$name: the refusal did not name the pull request"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "bitbucket-refuse-$name: the refusal did not name the failing condition"
+    assert_absent "$case_dir/twg-merge-args" "bitbucket-refuse-$name: a merge was attempted despite the refusal"
+    assert_present "$case_dir/state/task-x1.check.sh" \
+      "bitbucket-refuse-$name: a refusal should still leave the merge poll armed"
+  done
+  pass "fm-pr-merge refuses a Bitbucket pull request that is closed, a draft, or red, pending, stopped, or unreported at its head"
+}
+
+test_bitbucket_blocking_mergeability_refuses() {
+  local case_dir rc=0
+  case_dir=$(make_bitbucket_case bitbucket-blocked)
+  printf '[{"type":"standard","status":"FAILED","required":true,"blocking":true,"check":{"name":"Approvals"},"message":"Needs 1 approval"}]\n' \
+    > "$case_dir/mergeability.json"
+  run_bitbucket_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "bitbucket-blocked: a blocking mergeability check should refuse"
+  assert_grep 'Bitbucket blocks the merge: Approvals is FAILED: Needs 1 approval' "$case_dir/stderr" \
+    "bitbucket-blocked: the blocking check was not named"
+  assert_absent "$case_dir/twg-merge-args" "bitbucket-blocked: a merge was attempted despite a blocking check"
+  printf 'not json\n' > "$case_dir/mergeability.json"
+  rc=0
+  run_bitbucket_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "bitbucket-blocked: unreadable mergeability should refuse"
+  assert_grep "mergeability checks could not be read" "$case_dir/stderr" \
+    "bitbucket-blocked: unreadable mergeability was not reported"
+  pass "fm-pr-merge refuses a Bitbucket merge that Bitbucket's own mergeability checks block or that cannot be read"
+}
+
+test_bitbucket_merge_strategy_selection() {
+  local case_dir rc
+  case_dir=$(make_bitbucket_case bitbucket-strategy-default)
+  printf '[{"name":"main","default_merge_strategy":"merge_commit"}]\n' > "$case_dir/branches.json"
+  rc=0
+  run_bitbucket_merge "$case_dir" || rc=$?
+  expect_code 0 "$rc" "bitbucket-strategy-default: merge should succeed: $(cat "$case_dir/stderr")"
+  assert_grep '--merge-strategy merge_commit' "$case_dir/twg-merge-args" \
+    "bitbucket-strategy-default: the destination's merge_commit default was not used"
+
+  case_dir=$(make_bitbucket_case bitbucket-strategy-unsupported)
+  printf '[{"name":"main","default_merge_strategy":"rebase_merge"}]\n' > "$case_dir/branches.json"
+  rc=0
+  run_bitbucket_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "bitbucket-strategy-unsupported: a default twg cannot merge with should refuse"
+  assert_grep 'default merge strategy is "rebase_merge"' "$case_dir/stderr" \
+    "bitbucket-strategy-unsupported: the unsupported default was not named"
+  assert_absent "$case_dir/twg-merge-args" "bitbucket-strategy-unsupported: a merge was attempted"
+
+  case_dir=$(make_bitbucket_case bitbucket-strategy-caller)
+  rc=0
+  run_bitbucket_merge "$case_dir" -- --merge || rc=$?
+  expect_code 0 "$rc" "bitbucket-strategy-caller: --merge should merge: $(cat "$case_dir/stderr")"
+  assert_grep '--merge-strategy merge_commit' "$case_dir/twg-merge-args" \
+    "bitbucket-strategy-caller: --merge did not select merge_commit"
+
+  for spec in "--rebase|other than a merge strategy" "--delete-branch|branch deletion" "--close-source-branch|branch deletion"; do
+    case_dir=$(make_bitbucket_case "bitbucket-arg-${spec%%|*}")
+    rc=0
+    run_bitbucket_merge "$case_dir" -- "${spec%%|*}" || rc=$?
+    expect_code 1 "$rc" "bitbucket-arg-${spec%%|*}: the argument should be refused"
+    assert_grep "${spec#*|}" "$case_dir/stderr" "bitbucket-arg-${spec%%|*}: the refusal did not explain itself"
+    assert_absent "$case_dir/twg-merge-args" "bitbucket-arg-${spec%%|*}: a merge was attempted"
+  done
+
+  case_dir=$(make_bitbucket_case bitbucket-arg-close-attended)
+  rc=0
+  run_bitbucket_merge "$case_dir" --attended-override -- --close-source-branch || rc=$?
+  expect_code 0 "$rc" "bitbucket-arg-close-attended: an attended close should merge: $(cat "$case_dir/stderr")"
+  assert_grep '--close-source-branch --wait' "$case_dir/twg-merge-args" \
+    "bitbucket-arg-close-attended: the attended close was not passed to twg"
+  pass "fm-pr-merge picks the Bitbucket strategy from the caller or the destination default and refuses what twg cannot do"
+}
+
+test_bitbucket_refuses_waivers_and_moved_heads() {
+  local case_dir rc flag
+  for flag in "--allow-red build" "--allow-missing build" "--allow-no-pipeline" "--update-branch"; do
+    case_dir=$(make_bitbucket_case "bitbucket-waiver-${flag%% *}")
+    rc=0
+    # shellcheck disable=SC2086 # The flag and its value are two words.
+    run_bitbucket_merge "$case_dir" $flag || rc=$?
+    expect_code 2 "$rc" "bitbucket-waiver-$flag: the waiver should be refused as a usage error"
+    assert_absent "$case_dir/twg-merge-args" "bitbucket-waiver-$flag: a merge was attempted"
+  done
+
+  case_dir=$(make_bitbucket_case bitbucket-head-moved)
+  write_bitbucket_pr_json "$case_dir/pr-moved.json" head="$BB_MOVED_HEAD"
+  rc=0
+  run_bitbucket_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "bitbucket-head-moved: a head that moved after verification should refuse"
+  assert_grep "its head moved from the verified $BB_HEAD to $BB_MOVED_HEAD" "$case_dir/stderr" \
+    "bitbucket-head-moved: the moved head was not reported"
+  assert_absent "$case_dir/twg-merge-args" "bitbucket-head-moved: a merge was attempted on an unverified head"
+
+  case_dir=$(make_bitbucket_case bitbucket-expected-head)
+  rc=0
+  run_bitbucket_merge "$case_dir" --expected-head "$BB_MOVED_HEAD" || rc=$?
+  expect_code 1 "$rc" "bitbucket-expected-head: a disagreeing --expected-head should refuse"
+  assert_absent "$case_dir/twg-merge-args" "bitbucket-expected-head: a merge was attempted"
+  pass "fm-pr-merge refuses Bitbucket waivers and any head other than the one it verified"
+}
+
+test_bitbucket_unconfirmed_merge_is_not_landed() {
+  local case_dir rc=0
+  case_dir=$(make_bitbucket_case bitbucket-merge-fails)
+  : > "$case_dir/twg-merge-fails"
+  run_bitbucket_merge "$case_dir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "bitbucket-merge-fails: a rejected merge should exit non-zero"
+  assert_grep "Bitbucket did not confirm $BB_URL as merged" "$case_dir/stderr" \
+    "bitbucket-merge-fails: the unconfirmed merge was not reported"
+  assert_grep 'merge rejected' "$case_dir/stderr" \
+    "bitbucket-merge-fails: the forge's own error was not surfaced"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "bitbucket-merge-fails: the merge poll should stay armed"
+  pass "fm-pr-merge reports a Bitbucket merge that did not land instead of recording it"
+}
+
+test_bitbucket_green_pull_request_merges_with_the_default_strategy
+test_bitbucket_each_condition_refuses_independently
+test_bitbucket_blocking_mergeability_refuses
+test_bitbucket_merge_strategy_selection
+test_bitbucket_refuses_waivers_and_moved_heads
+test_bitbucket_unconfirmed_merge_is_not_landed

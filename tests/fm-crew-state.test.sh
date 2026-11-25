@@ -1785,6 +1785,42 @@ test_terminal_passed_with_forgejo_pull_reports_its_state() {
   pass "terminal passed run reads Forgejo pull request state through tea api"
 }
 
+# A Bitbucket Cloud pull request is read through twg; Bitbucket spells an
+# unmerged closed one DECLINED or SUPERSEDED.
+test_terminal_passed_with_bitbucket_pull_reports_its_state() {
+  reset_fakes
+  local d read_log out spec state fail expected name url
+  url=https://bitbucket.org/ws/repo/pull-requests/12
+  for spec in "open|OPEN|0|run passed: PR open" \
+    "merged|MERGED|0|run passed: PR merged" \
+    "declined|DECLINED|0|run passed: PR closed" \
+    "superseded|SUPERSEDED|0|run passed: PR closed" \
+    "unreadable|OPEN|1|run passed: PR state unknown (unreadable)"; do
+    IFS='|' read -r name state fail expected <<<"$spec"
+    d=$(new_case "passed-bitbucket-$name")
+    make_repo_on_branch "$d/wt" "fm/feat-dbb$name"
+    make_fakebin "$d" >/dev/null
+    read_log="$d/twg-read.log"
+    : > "$read_log"
+    cat > "$d/fakebin/twg" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$read_log"
+[ "$fail" = 0 ] || exit 1
+printf '{"id":12,"state":"%s","source":{"commit":{"hash":"abcdefabcdef"}}}\n' '$state'
+SH
+    chmod +x "$d/fakebin/twg"
+    fm_write_meta "$d/state/feat-dbb$name.meta" "window=fm:fm-feat-dbb$name" \
+      "worktree=$d/wt" "kind=ship" "pr=$url"
+    FM_FAKE_AXI_STATUS="$(run_passed_with_pr "fm/feat-dbb$name" "$url")"
+    out=$(run_crew_state "$d" "feat-dbb$name")
+    assert_contains "$out" "$expected" "Bitbucket pull request reading $name is reported"
+    [ "$name" = merged ] || assert_not_contains "$out" "PR merged" "Bitbucket $name pull request must not be reported merged"
+    assert_grep 'bitbucket pull-requests get 12 --workspace ws --repo repo --statuses' "$read_log" \
+      "Bitbucket read uses the parsed workspace and repository"
+  done
+  pass "terminal passed run reads Bitbucket pull request state through twg"
+}
+
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged() {
   reset_fakes
   local d url read_log out
@@ -6802,6 +6838,7 @@ test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_forgejo_pull_reports_its_state
+test_terminal_passed_with_bitbucket_pull_reports_its_state
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
 test_terminal_passed_with_open_gerrit_change_does_not_claim_merged

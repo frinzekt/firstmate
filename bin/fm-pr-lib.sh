@@ -5,7 +5,8 @@
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
 # "path" is the full project path, which is owner/repository on GitHub and
-# Forgejo, an arbitrarily nested group/subgroup/project namespace on GitLab, and
+# Forgejo, workspace/repository on Bitbucket Cloud (bitbucket.org only), an
+# arbitrarily nested group/subgroup/project namespace on GitLab, and
 # an arbitrarily nested project name on Gerrit, where "number" is the change
 # number. A GitLab or Gerrit project can sit at any depth, so no
 # owner/repository pair can address one and the sidecar carries the whole path
@@ -211,6 +212,19 @@ fm_pr_forgejo_segment_valid() {
   esac
 }
 
+# A Bitbucket Cloud workspace or repository slug. Bitbucket serves both slugs
+# lowercase only, so one canonical spelling per pull request is lowercase letters,
+# digits, ".", "_", and "-", never a leading hyphen (which a CLI would read as an
+# option), "." or "..", or a ".git" suffix.
+fm_pr_bitbucket_segment_valid() {
+  local segment=${1-}
+  local LC_ALL=C
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 100 ] || return 1
+  case "$segment" in
+    .|..|-*|*.git|*[!a-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # A GitHub pull request URL names its host, and github.com is the only GitHub
 # host accepted without being declared: every other host must be listed in this
 # home's config/github-hosts (fm_github_host_allowed), so a look-alike such as
@@ -253,8 +267,9 @@ fm_pr_github_host_export() {  # <host>
 # username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
 # each get their own namespace rules rather than a loosened GitHub rule.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
-# because bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab or
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github, forgejo, and
+# bitbucket because bin/fm-pr-merge.sh addresses each by owner (a Bitbucket
+# workspace) and repository. A gitlab or
 # gerrit URL leaves them empty, and those paths address the project by FM_PR_HOST and
 # FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
 # host.
@@ -318,6 +333,27 @@ fm_pr_url_parse() {
     FM_PR_URL=$raw
     FM_PR_HOST=$host
     FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Bitbucket Cloud serves pull requests at workspace/repo/pull-requests/<n> on
+  # bitbucket.org alone, so the host is a constant rather than an instance name;
+  # Bitbucket Data Center uses a different route and is not accepted here.
+  # "pull-requests" is neither "pull" nor "pulls", so this shape never collides
+  # with the GitHub or Forgejo patterns.
+  pattern='^https://bitbucket\.org/([a-z0-9._-]{1,100})/([a-z0-9._-]{1,100})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    fm_pr_bitbucket_segment_valid "${BASH_REMATCH[1]}" || return 1
+    fm_pr_bitbucket_segment_valid "${BASH_REMATCH[2]}" || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    # Consumed by bin/fm-pr-merge.sh, which addresses Bitbucket by workspace/repository.
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=${BASH_REMATCH[1]}
+    # shellcheck disable=SC2034
+    FM_PR_REPO=${BASH_REMATCH[2]}
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
@@ -1386,6 +1422,109 @@ FIELDS
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
   # Consumed by bin/fm-teardown.sh pr_is_merged.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_HEAD=$head
+}
+
+# Bitbucket Cloud is read and merged through `twg bitbucket`, addressed by an
+# explicit --workspace and --repo from the parsed identity so a read outside a
+# clone never falls back to a local git remote. `-o json --output-summary none`
+# makes twg print the payload itself on stdout rather than a summary envelope
+# naming a file. The credential stays inside twg's own login.
+fm_pr_bitbucket_twg() {  # <twg bitbucket args...>
+  command -v twg >/dev/null 2>&1 || return 1
+  twg bitbucket "$@" -o json --output-summary none 2>/dev/null
+}
+
+# A Bitbucket pull request names its source head by an abbreviated hash, so the
+# full head is the one full 40-hex commit hash among the pull request's own
+# commits and the build statuses' commits that starts with that abbreviation;
+# no match or several matches print an empty head. A status list may arrive as
+# a bare array or as a paginated object's values.
+# shellcheck disable=SC2016 # jq program text, not shell expansions.
+FM_PR_BITBUCKET_JQ_DEFS='
+  def bb_statuses:
+    (._statuses // .statuses // [])
+    | if type == "object" then (.values // []) else . end
+    | if type == "array" then . else [] end;
+  def bb_head:
+    (.source.commit.hash // "") as $short
+    | if ($short | type) == "string" and ($short | test("^[0-9a-f]{7,40}$")) then
+        [ ((._commits // []) | if type == "array" then . else [] end | .[]? | .hash?),
+          (bb_statuses | .[]? | .commit?.hash?) ]
+        | map(select(type == "string" and test("^[0-9a-f]{40}$") and startswith($short)))
+        | unique
+        | if length == 1 then .[0] else "" end
+      else "" end;
+  def bb_pr:
+    if type == "array" and length == 1 then .[0] else . end
+    | if type == "object" and (.id | type) == "number" and (.state | type) == "string"
+      then . else error("invalid Bitbucket pull request record") end;
+'
+
+# The live JSON record of one Bitbucket pull request with its build statuses,
+# normalized to the single object and checked to be pull request <number>.
+fm_pr_bitbucket_read_json() {  # <path> <number>
+  local path=$1 number=$2 json
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$path" in
+    */*/*|/*|*/|'') return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  json=$(fm_pr_bitbucket_twg pull-requests get "$number" \
+    --workspace "${path%%/*}" --repo "${path#*/}" --statuses) || return 1
+  [ -n "$json" ] || return 1
+  printf '%s' "$json" | jq -c --argjson n "$number" \
+    "$FM_PR_BITBUCKET_JQ_DEFS"' bb_pr | if .id == $n then . else error("wrong pull request") end' \
+    2>/dev/null
+}
+
+# The state, merged flag, and full head commit of one Bitbucket pull request.
+# Bitbucket spells the states OPEN, MERGED, DECLINED, and SUPERSEDED; only MERGED
+# is merged. The head is empty when the abbreviated source hash cannot be
+# resolved to exactly one full commit (FM_PR_BITBUCKET_JQ_DEFS bb_head).
+fm_pr_bitbucket_read_record() {  # <host> <path> <number>
+  local host=$1 path=$2 number=$3 json fields line
+  local total=0 named=0 state='' merged='' head=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  FM_PR_RECORD_HEAD=
+  [ "$host" = bitbucket.org ] || return 1
+  json=$(fm_pr_bitbucket_read_json "$path" "$number") || return 1
+  if ! fields=$(printf '%s' "$json" | jq -r "$FM_PR_BITBUCKET_JQ_DEFS"'
+      "state=" + .state,
+      "merged=" + (if .state == "MERGED" then "true" else "false" end),
+      "head=" + bb_head' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      head=*) head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+  # Consumed by bin/fm-teardown.sh pr_is_merged; empty when unresolvable.
   # shellcheck disable=SC2034
   FM_PR_RECORD_HEAD=$head
 }

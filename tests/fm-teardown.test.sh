@@ -1493,6 +1493,52 @@ test_squash_merged_forgejo_pr_allows_when_main_moved_on() {
   pass "teardown proves a Forgejo task landed from the merged pull request when the content check is inconclusive"
 }
 
+# Override twg to answer a Bitbucket pull request record in the given state
+# whose abbreviated source hash and commits resolve to the given full head.
+add_twg_pull_for_head() {
+  local case_dir=$1 state=$2 head=$3
+  cat > "$case_dir/fakebin/twg" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/twg.log"
+printf '{"id":7,"state":"%s","source":{"commit":{"hash":"%s"}},"_commits":[{"hash":"%s"}],"_statuses":[]}\n' '$state' '${head:0:12}' '$head'
+SH
+  chmod +x "$case_dir/fakebin/twg"
+}
+
+# The same inconclusive history as the Forgejo case: only the Bitbucket
+# pull request's MERGED record, read through twg, can prove the work landed.
+test_squash_merged_bitbucket_pr_allows_when_main_moved_on() {
+  local case_dir rc pr_head tmp state expected
+  for state in MERGED OPEN; do
+    case_dir=$(make_case "bitbucket-merged-$state")
+    write_meta "$case_dir" direct-PR ship
+    pr_head=$(setup_squash_rebased_history "$case_dir" rebased)
+    tmp="$case_dir/_main_later"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    printf '%s\n' base main-edit feature-edit-reworded > "$tmp/shared.txt"
+    git -C "$tmp" add -- shared.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "main rewords shared"
+    git -C "$tmp" push -q origin main
+    rm -rf "$tmp"
+    printf '%s\n' 'pr=https://bitbucket.org/team/repo/pull-requests/7' >> "$case_dir/state/task-x1.meta"
+    add_gh_axi_error "$case_dir"
+    add_twg_pull_for_head "$case_dir" "$state" "$pr_head"
+    ln -sf "$(command -v jq)" "$case_dir/fakebin/jq"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=1
+    [ "$state" != MERGED ] || expected=0
+    expect_code "$expected" "$rc" "bitbucket-merged-$state: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'bitbucket pull-requests get 7 --workspace team --repo repo --statuses' "$case_dir/twg.log" \
+      || fail "bitbucket-merged-$state: teardown did not read the Bitbucket pull request through twg"
+  done
+  pass "teardown proves a Bitbucket task landed from the merged pull request when the content check is inconclusive"
+}
+
 add_glab_mr_for_head() {
   local case_dir=$1 state=$2 head=$3
   cat > "$case_dir/fakebin/glab" <<SH
@@ -6649,6 +6695,7 @@ test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
+test_squash_merged_bitbucket_pr_allows_when_main_moved_on
 test_squash_merged_gitlab_mr_allows_when_main_moved_on
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses

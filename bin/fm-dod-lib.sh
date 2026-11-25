@@ -63,16 +63,18 @@
 # task's done. Teardown's landed-work test remains the complete discard gate.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
-# appends " forge=gerrit shape=squash" to that line, and a forge=forgejo or
-# forge=external block appends " forge=forgejo" or " forge=external". The "Ship branch: <branch>"
+# appends " forge=gerrit shape=squash" to that line, and a forge=forgejo,
+# forge=bitbucket, or forge=external block appends " forge=forgejo",
+# " forge=bitbucket", or " forge=external". The "Ship branch: <branch>"
 # line under it is machine-readable the same way: bin/fm-spawn.sh refuses a ship
 # whose spawn-selected branch disagrees with it.
-# forge is none|gerrit|forgejo|external and defaults to none;
+# forge is none|gerrit|forgejo|bitbucket|external and defaults to none;
 # bin/fm-project-mode.sh's header owns what the registry binding means, and this
 # file owns what each forge changes for a WORKER (docs/gerrit-forge-integration.md
 # is the gerrit design and docs/external-review-forge.md the external one). In
-# the Definition of done, forgejo changes only the CLI a direct-PR worker opens
-# its pull request with: tea instead of gh-axi. A forge composes with
+# the Definition of done, forgejo and bitbucket change only the CLI a worker
+# opens, edits, and reads back its pull request with: tea or twg bitbucket
+# instead of gh-axi. A forge composes with
 # the two modes that publish and is refused on local-only, which publishes
 # nothing. On gerrit the worker publishes one squashed change with
 # `gerrit-axi publish --squash` instead of opening a pull request: direct-PR does
@@ -189,9 +191,9 @@ fm_mode_publishes() {  # <mode>
 fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   local forge=$1 mode=$2 caller=$3
   case "$forge" in
-    none|gerrit|forgejo|external) ;;
+    none|gerrit|forgejo|bitbucket|external) ;;
     *)
-      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, or external)" >&2
+      echo "error: $caller: unknown forge '$forge' (expected none, gerrit, forgejo, bitbucket, or external)" >&2
       return 1 ;;
   esac
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
@@ -209,7 +211,8 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
 # Only a no-mistakes ship takes manual: direct-PR already leaves the text to the
 # worker and local-only opens no PR. A bound forge is refused too: gerrit has no
 # pull request to describe, external uploads through a review tool, and the
-# forgejo worker's tea commands are not written into this block yet.
+# forgejo and bitbucket workers' tea and twg commands are not written into this
+# block yet.
 fm_pr_text_valid() {  # <pr> <mode> <forge> <caller>
   local pr=$1 mode=$2 forge=$3 caller=$4
   case "$pr" in
@@ -585,7 +588,7 @@ If any command would reach another repository, append \`blocked [at=<epoch>]: pu
 
 fm_dod_block_body() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi pr_open='' draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   fm_pr_text_valid "$pr" "$mode" "$forge" fm_dod_block || return 1
@@ -602,6 +605,13 @@ fm_dod_block_body() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>
     forge_cli=tea
     draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
   fi
+  if [ "$forge" = bitbucket ]; then
+    contract_forge=' forge=bitbucket'
+    forge_cli='twg bitbucket'
+    pr_open="\`twg bitbucket pull-requests create --workspace <workspace> --repo <repo> --source $branch --title '<title>' --description-file <path>\`, where <workspace>/<repo> come from the project's bitbucket.org origin,"
+    draft_check="(\`twg bitbucket pull-requests get <number> --workspace <workspace> --repo <repo> -o json --output-summary none\` must show \`draft\` as false, where <workspace>/<repo> and <number> come from your PR URL); if it is a draft, mark it ready with \`twg bitbucket pull-requests update --pull-request <number> --workspace <workspace> --repo <repo> --ready\`."
+  fi
+  [ -n "$pr_open" ] || pr_open="\`$forge_cli\`"
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
     pr_base=", against the base branch \`$base\` (\`--base $base_q\`), not the repository default"
@@ -693,7 +703,7 @@ Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
+When it is implemented and committed, push your branch and open a PR with $pr_open that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
@@ -783,7 +793,7 @@ fm_dod_note_reports_ci_ready() {  # <note>
 # not the bare letters PR inside words such as PROD or PROPERTIES.
 fm_dod_note_has_pr_reference() {  # <note>
   printf '%s' "$1" \
-    | grep -Eq '(^|[^[:alnum:]])PR[[:space:]]*#[0-9]+([^[:alnum:]]|$)|/pull/[0-9]+([^[:alnum:]]|$)|/pulls/[0-9]+([^[:alnum:]]|$)|/merge_requests/[0-9]+([^[:alnum:]]|$)'
+    | grep -Eq '(^|[^[:alnum:]])PR[[:space:]]*#[0-9]+([^[:alnum:]]|$)|/pull/[0-9]+([^[:alnum:]]|$)|/pulls/[0-9]+([^[:alnum:]]|$)|/pull-requests/[0-9]+([^[:alnum:]]|$)|/merge_requests/[0-9]+([^[:alnum:]]|$)'
 }
 
 # 0 when a done: note reports a change published to a Gerrit review server

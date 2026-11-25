@@ -20,7 +20,9 @@
 # own registration, so a later repository update does not invalidate it; task and
 # PR data live only in a private sidecar and are never interpolated into shell
 # source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
+# A GitHub pull request URL, a GitLab merge request URL, a Gerrit change URL, a
+# Forgejo pull request URL, and a Bitbucket Cloud pull request URL
+# (https://bitbucket.org/<workspace>/<repo>/pull-requests/<n>, read through twg)
 # are all accepted, including a merge request or change on a self-hosted
 # instance and a GitHub Enterprise pull request on a host this home names in
 # config/github-hosts.
@@ -288,6 +290,14 @@ if [ "$PROVIDER" = forgejo ]; then
     exit 1
   }
 fi
+# A Bitbucket Cloud watch reads the pull request through twg and its state out
+# of the JSON record, so both are required for the same reason as above.
+if [ "$PROVIDER" = bitbucket ]; then
+  if ! command -v twg >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a Bitbucket pull request requires twg and jq on PATH" >&2
+    exit 1
+  fi
+fi
 
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
@@ -305,7 +315,9 @@ fi
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, and
 # tea's single-PR view ignores field selection entirely, so neither a GitLab
-# nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
+# nor a Forgejo task records a pr_head here; Bitbucket names its head only by an
+# abbreviated hash, so a Bitbucket task records none either, and neither does a
+# Gerrit task: a
 # Gerrit revision names one patch set, every amend or rebase is a new patch set,
 # and bin/fm-review-diff.sh has no Gerrit path to resolve a current head with,
 # so a recorded revision would silently become the reviewed content. Both
@@ -314,7 +326,7 @@ fi
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh fetches a pull request head from the remote when none is
 # recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at merge time for the
+# bin/fm-pr-merge.sh reads a GitLab, Forgejo, or Bitbucket head live at merge time for the
 # same reason, and treats a recorded value that disagrees as stale rather than
 # authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
