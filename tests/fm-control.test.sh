@@ -704,6 +704,10 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
         sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta" > "$dir/home/state/t1.meta.new"
         printf 'terminal=term-1\norca_worktree_id=wt-1::/orca/wt-1\n' >> "$dir/home/state/t1.meta.new"
         mv "$dir/home/state/t1.meta.new" "$dir/home/state/t1.meta"
+        # An Orca relaunch first asks the runtime to prove the terminal gone;
+        # an unreachable one refuses, and no real Orca on PATH is ever asked.
+        printf '#!/bin/sh\nexit 1\n' > "$dir/fakebin/orca"
+        chmod +x "$dir/fakebin/orca"
         ;;
     esac
     alive_as "$dir" claude
@@ -752,6 +756,11 @@ test_state_verified_backends_are_exactly_tmux_herdr_and_rex() {
   for backend in zellij orca cmux paseo tern; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
+  done
+  fm_control_backend_reclaim_only orca || fail "orca relaunches only onto a terminal proven gone"
+  for backend in tmux herdr rex zellij cmux paseo tern t3code; do
+    fm_control_backend_reclaim_only "$backend" \
+      && fail "$backend must not take the reclaim-only relaunch route"
   done
   pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
 }

@@ -387,13 +387,25 @@ fm_control_backend_exit_supported() {  # <backend>
 # nightlies refused a driver change outright), never the fresh agent a
 # relaunch promises. So t3code has no replacement to launch and a relaunch
 # is refused before anything is stopped (docs/t3code-backend.md "Active
-# limits"). zellij, orca, cmux, and paseo never reach this table: they fail
-# fm_control_backend_state_verified first.
+# limits"). Orca hosts a replacement only in a fresh terminal of the recorded
+# worktree, after fm_control_backend_reclaim_only's gate. zellij, cmux, and
+# paseo never reach this table: they fail fm_control_backend_state_verified
+# first.
 fm_control_backend_relaunch_supported() {  # <backend>
   case "${1-}" in
-    tmux|herdr|rex) return 0 ;;
+    tmux|herdr|rex|orca) return 0 ;;
   esac
   return 1
+}
+
+# Whether <backend> can relaunch ONLY onto an endpoint proven gone. Orca has
+# no recovery-grade agent classifier, so it can neither stop a live agent nor
+# adopt an agent-free terminal, but fm_control_endpoint_absence_verdict can
+# prove its recorded terminal is gone, and a fresh terminal in the recorded
+# worktree then hosts the replacement. Every other outcome refuses before
+# anything is touched; exit and interrupt are unchanged.
+fm_control_backend_reclaim_only() {  # <backend>
+  [ "${1-}" = orca ]
 }
 
 # Whether a raw fm_backend_agent_state reading on <backend> goes through
@@ -402,11 +414,14 @@ fm_control_backend_relaunch_supported() {  # <backend>
 # passive reads never start a server, so a stopped server - which ends every
 # session on it - reads as unreachable rather than not-found, and only the
 # recheck (which may start the personal server) can turn that into a proof.
+# Orca's `unverified` does too, because its only route to a relaunch is the
+# recheck's proof that the recorded terminal is gone.
 # Passive readers keep the raw state.
 fm_control_absence_recheck_applies() {  # <backend> <raw-state>
   case "${2-}" in
     missing) return 0 ;;
     unreadable) [ "${1-}" = rex ] ;;
+    unverified) [ "${1-}" = orca ] ;;
     *) return 1 ;;
   esac
 }
@@ -453,6 +468,14 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
+#   orca CAN prove it, and only it. `orca status` must reach a ready
+#     runtime, the recorded worktree must still resolve (re-registering the
+#     project when a redeployed runtime lost its registry, never creating a
+#     worktree), its complete live terminal list must omit the recorded
+#     handle, and `terminal show` must answer that handle stale or not found
+#     (bin/backends/orca.sh fm_backend_orca_endpoint_absence_recheck). A
+#     terminal still listed is `unproven`, never `alive` or `dead`: Orca
+#     cannot classify what runs in it.
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -488,6 +511,13 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe Rex server the task was created on could not be reached from here, or its block could not be classified' ;;
+      esac
+      ;;
+    orca)
+      case "$(fm_backend_orca_endpoint_absence_recheck "$target" "$(fm_meta_get "$meta" orca_worktree_id)" "$(fm_meta_get "$meta" worktree)" "$(fm_meta_get "$meta" project)")" in
+        gone) printf 'gone\t' ;;
+        present) printf 'unproven\tthe recorded Orca terminal is still live, and Orca cannot classify whether an agent runs in it' ;;
+        *) printf 'unproven\tthe Orca runtime was not ready, the recorded worktree could not be resolved or adopted, or the terminal inventory did not prove the recorded terminal gone' ;;
       esac
       ;;
     t3code)

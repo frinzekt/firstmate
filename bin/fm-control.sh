@@ -70,9 +70,14 @@
 #              placement), and the task's record rebinds to it; that is how a task
 #              whose terminal was destroyed is reclaimed by the home that owns
 #              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR- and REX-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              answer. Reclaim is HERDR-, REX-, and ORCA-ONLY for the reason
+#              `exit` gives above: a tmux `missing` cannot be proven absent
+#              from a task record, so it refuses. Orca, which has no agent
+#              classifier, relaunches ONLY a task whose recorded terminal is
+#              proven gone (fm_control_backend_reclaim_only), into one fresh
+#              terminal of the recorded worktree; a still-live terminal, an
+#              unready runtime, or an unresolvable worktree refuses before the
+#              checkpoint, and its exit and interrupt are unchanged.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -1217,10 +1222,17 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line absence reclaim_only=0
   local -a spawn_args
 
-  require_state_verified_backend relaunch
+  # A reclaim-only backend (Orca) has no classifier to stop a live agent, so
+  # its one route is an endpoint already proven gone; checked below, before
+  # the checkpoint, so every other outcome refuses with nothing touched.
+  if fm_control_backend_reclaim_only "$BACKEND"; then
+    reclaim_only=1
+  else
+    require_state_verified_backend relaunch
+  fi
   fm_control_backend_relaunch_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, where a thread keeps its conversation and a new turn or provider change continues the same agent, so no fresh replacement can be launched into its endpoint; 'interrupt' ends its turn, and a fresh task needs a teardown and a new dispatch"
   resolve_relaunch_profile
@@ -1243,6 +1255,12 @@ do_relaunch() {
       ;;
   esac
 
+  if [ "$reclaim_only" = 1 ]; then
+    absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" "$META")
+    [ "${absence%%$'\t'*}" = gone ] \
+      || die "task $ID runs on the $BACKEND backend, which can relaunch only onto a terminal proven gone because it cannot classify or stop a live agent; ${absence#*$'\t'}; refusing before anything is touched"
+  fi
+
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else
@@ -1257,7 +1275,11 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$reclaim_only" = 1 ]; then
+    exit_result="endpoint-gone"
+  else
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -1294,9 +1316,17 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
-    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
-  }
+  if [ "$reclaim_only" = 1 ]; then
+    # No classifier can read the replacement as alive here; the launch owner
+    # already confirmed delivery, and the new terminal must answer a read.
+    fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
+      || die "the replacement agent for $ID was launched, but its new $BACKEND terminal $T does not answer a read"
+    state="endpoint-live"
+  else
+    state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+      die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+    }
+  fi
   RELAUNCH_AGENT_CONFIRMED=1
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"

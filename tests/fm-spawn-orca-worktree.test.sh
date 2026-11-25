@@ -13,14 +13,12 @@
 # the worktree Orca actually created, proving the skip does not just avoid an
 # error but lets a genuine Orca launch complete.
 #
-# The matching relaunch-side carve-out at the `[ "$RELAUNCH" -eq 1 ] &&
-# [ "$BACKEND" = orca ]` branch is guarded by an earlier, unconditional gate:
-# fm_control_backend_state_verified (bin/fm-control-lib.sh) only recognizes
-# tmux and herdr as having a recovery-grade agent-state classifier, so any
-# `--relaunch` on backend=orca is refused before that branch can ever run.
-# The second test below pins that refusal so a future change that starts
-# routing orca through the classifier does not silently reach the untested
-# branch without also covering it.
+# The relaunch-side carve-out at the `[ "$RELAUNCH" -eq 1 ] &&
+# [ "$BACKEND" = orca ]` branch is reached only through the Orca reclaim: the
+# recorded terminal must be proven gone (bin/fm-control-lib.sh
+# fm_control_endpoint_absence_verdict), and a stateful fake Orca below pins the
+# rebind, the refusals, and the adoption of a worktree a redeployed runtime
+# forgot.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -183,50 +181,301 @@ EOF
   pass "an Orca-backed fresh spawn enters the worktree Orca created for it, instead of hard-refusing on the post-launch proof"
 }
 
-test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run() {
-  local case_dir home proj wt id=orca-relaunch-a2 out status
-  case_dir="$TMP_ROOT/relaunch"
-  home="$case_dir/home"
-  proj="$case_dir/proj"
-  wt="$case_dir/wt"
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
-  touch "$home/state/.last-watcher-beat"
-  printf 'manual\n' > "$home/config/backlog-backend"
-  fm_git_worktree "$proj" "$wt" "task-$id"
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<EOF
+# make_orca_reclaim_fakebin <dir>: a stateful fake `orca` for the relaunch
+# reclaim. State files under <dir>/orca:
+#   runtime-down     `orca status` reports an unreachable runtime
+#   known-wt         the worktree id this runtime knows (absent: none)
+#   repo-registered  the project is registered (absent: `repo show` fails)
+#   live             live terminal handles, one per line
+#   list-fails       `terminal list` exits non-zero
+# A path selector resolves the recorded worktree as "repo2::<path>" once the
+# project is registered, which is how a redeployed runtime names it. Every
+# call is logged to <dir>/orca/log.
+make_orca_reclaim_fakebin() {
+  local dir=$1 fb
+  fb=$(fm_fakebin "$dir")
+  mkdir -p "$dir/orca"
+  : > "$dir/orca/live"
+  cat > "$fb/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+S="${FM_TEST_ORCA_DIR:?}/orca"
+printf '%s\n' "$*" >> "$S/log"
+arg() {  # <flag>: the value after <flag>
+  local prev= a
+  for a in "$@"; do
+    [ "$prev" = "$FLAG" ] && { printf '%s' "$a"; return 0; }
+    prev=$a
+  done
+}
+meta='"_meta":{"runtimeId":"rt-1"}'
+case "$1 $2" in
+  "status --json")
+    if [ -e "$S/runtime-down" ]; then
+      printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"down"}}\n'
+      exit 1
+    fi
+    printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+    ;;
+  "repo show")
+    [ -e "$S/repo-registered" ] || exit 1
+    printf '{"ok":true,"result":{"repo":{"id":"repo2"}}}\n'
+    ;;
+  "repo add")
+    touch "$S/repo-registered"
+    printf '{"ok":true,"result":{"repo":{"id":"repo2"}}}\n'
+    ;;
+  "worktree show")
+    sel=$(FLAG=--worktree arg "$@")
+    case "$sel" in
+      id:*)
+        id=${sel#id:}
+        if [ -e "$S/known-wt" ] && [ "$id" = "$(cat "$S/known-wt")" ]; then
+          printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s","hostId":"local"}},%s}\n' "$id" "${id#*::}" "$meta"
+          exit 0
+        fi
+        ;;
+      path:*)
+        p=${sel#path:}
+        if [ -e "$S/repo-registered" ] && [ -d "$p" ]; then
+          printf 'repo2::%s' "$p" > "$S/known-wt"
+          printf '{"ok":true,"result":{"worktree":{"id":"repo2::%s","path":"%s","hostId":"local"}},%s}\n' "$p" "$p" "$meta"
+          exit 0
+        fi
+        ;;
+    esac
+    printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"},%s}\n' "$meta"
+    exit 1
+    ;;
+  "terminal list")
+    [ ! -e "$S/list-fails" ] || exit 1
+    rows=
+    while IFS= read -r h; do
+      [ -n "$h" ] || continue
+      rows="$rows${rows:+,}{\"handle\":\"$h\"}"
+    done < "$S/live"
+    printf '{"ok":true,"result":{"terminals":[%s],"hostScope":{"hostIds":["local"],"omittedHostIds":[]},"truncated":false},%s}\n' "$rows" "$meta"
+    ;;
+  "terminal show")
+    h=$(FLAG=--terminal arg "$@")
+    if grep -qxF "$h" "$S/live"; then
+      printf '{"ok":true,"result":{"terminal":{"handle":"%s"}},%s}\n' "$h" "$meta"
+      exit 0
+    fi
+    printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"},%s}\n' "$meta"
+    exit 1
+    ;;
+  "terminal create")
+    printf '%s\n' term-new >> "$S/live"
+    printf '%s\n' "$(FLAG=--worktree arg "$@")" > "$S/created-in"
+    printf '{"ok":true,"result":{"terminal":{"handle":"term-new"}}}\n'
+    ;;
+  "terminal read")
+    printf '{"ok":true,"result":{"tail":["$ "]}}\n'
+    ;;
+  "terminal close")
+    h=$(FLAG=--terminal arg "$@")
+    grep -vxF "$h" "$S/live" > "$S/live.tmp" || true
+    mv "$S/live.tmp" "$S/live"
+    printf '{"ok":true}\n'
+    ;;
+  "terminal send")
+    printf '{"ok":true}\n'
+    ;;
+  "worktree create")
+    touch "$S/worktree-created"
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/orca"
+  printf '%s\n' "$fb"
+}
+
+# orca_reclaim_case <name> <id>: a recorded Orca ship task whose worktree is
+# a real linked git worktree of its project and whose recorded terminal is
+# term-old. Sets RC_DIR, RC_HOME, RC_WT, RC_PROJ, RC_FB.
+orca_reclaim_case() {
+  local name=$1 id=$2
+  RC_DIR="$TMP_ROOT/$name"
+  RC_HOME="$RC_DIR/home"
+  RC_PROJ="$RC_DIR/proj"
+  RC_WT="$RC_DIR/wt"
+  mkdir -p "$RC_HOME/data/$id" "$RC_HOME/projects" "$RC_HOME/state" "$RC_HOME/config"
+  touch "$RC_HOME/state/.last-watcher-beat"
+  printf 'manual\n' > "$RC_HOME/config/backlog-backend"
+  fm_git_worktree "$RC_PROJ" "$RC_WT" "task-$id"
+  RC_PROJ=$(cd "$RC_PROJ" && pwd -P)
+  RC_WT=$(cd "$RC_WT" && pwd -P)
+  cat > "$RC_HOME/data/$id/brief.md" <<EOF
 # Task
 ## Captain's intent
-Exercise a relaunch attempt against a recorded Orca task.
+Exercise an Orca reclaim for $id.
 
 ## Firstmate spec
-Confirm the relaunch is refused before any worktree re-entry logic runs.
+Bring the worker back in the recorded worktree.
 EOF
   {
     echo "window=fm-$id"
     echo "endpoint_task_id=$id"
-    echo "worktree=$wt"
-    echo "project=$proj"
+    echo "worktree=$RC_WT"
+    echo "project=$RC_PROJ"
     echo "harness=codex"
     echo "kind=ship"
     echo "mode=no-mistakes"
     echo "yolo=off"
+    echo "tasktmp=/tmp/fm-$id"
+    echo "model=default"
+    echo "effort=default"
     echo "backend=orca"
-    echo "orca_worktree_id=wt-1::$wt"
-    echo "terminal=term-1"
-  } > "$home/state/$id.meta"
+    echo "orca_worktree_id=repo1::$RC_WT"
+    echo "terminal=term-old"
+  } > "$RC_HOME/state/$id.meta"
+  RC_FB=$(make_orca_reclaim_fakebin "$RC_DIR")
+  printf 'repo1::%s' "$RC_WT" > "$RC_DIR/orca/known-wt"
+  touch "$RC_DIR/orca/repo-registered"
+}
 
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" "$id" --relaunch 2>&1)
+orca_reclaim_run() {  # <script> <args...>
+  local script=$1
+  shift
+  mkdir -p "$RC_DIR/user-home"
+  FM_ROOT_OVERRIDE='' FM_HOME="$RC_HOME" HOME="$RC_DIR/user-home" \
+    FM_STATE_OVERRIDE="$RC_HOME/state" FM_DATA_OVERRIDE="$RC_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$RC_HOME/projects" FM_CONFIG_OVERRIDE="$RC_HOME/config" \
+    FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$RC_DIR" PATH="$RC_FB:$PATH" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$script" "$@" 2>&1
+}
+
+orca_meta() {  # <id> <key>
+  grep "^$2=" "$RC_HOME/state/$1.meta" | tail -1 | cut -d= -f2-
+}
+
+test_orca_relaunch_rebinds_a_terminal_proven_gone() {
+  local id=orca-gone-a1 out status before
+  orca_reclaim_case gone "$id"
+  before=$(git -C "$RC_WT" rev-parse HEAD)
+  printf 'uncommitted\n' > "$RC_WT/dirty.txt"
+  out=$(orca_reclaim_run "$SPAWN" "$id" --relaunch)
   status=$?
+  expect_code 0 "$status" "a relaunch whose Orca terminal is proven gone should succeed"$'\n'"$out"
+  [ "$(orca_meta "$id" terminal)" = term-new ] || fail "the record did not rebind terminal= to the new terminal: $(orca_meta "$id" terminal)"
+  [ "$(orca_meta "$id" orca_worktree_id)" = "repo1::$RC_WT" ] || fail "the worktree id moved: $(orca_meta "$id" orca_worktree_id)"
+  [ "$(orca_meta "$id" worktree)" = "$RC_WT" ] || fail "the recorded worktree moved"
+  [ "$(orca_meta "$id" endpoint_task_id)" = "$id" ] || fail "the task identity moved"
+  [ "$(cat "$RC_DIR/orca/created-in")" = "id:repo1::$RC_WT" ] || fail "the new terminal was not opened in the recorded worktree"
+  [ ! -e "$RC_DIR/orca/worktree-created" ] || fail "a relaunch created a new Orca worktree"
+  [ "$(git -C "$RC_WT" rev-parse HEAD)" = "$before" ] || fail "the relaunch moved the worktree HEAD"
+  assert_contains "$(cat "$RC_WT/dirty.txt")" uncommitted "the relaunch lost an uncommitted change"
+  pass "Orca relaunch: a terminal proven gone gets one fresh terminal in the recorded worktree and the record rebinds to it"
+}
 
-  expect_code 1 "$status" "a relaunch against a recorded Orca task should refuse"$'\n'"$out"
-  assert_contains "$out" "no recovery-grade agent-state classifier" \
-    "the refusal should name the missing classifier, proving relaunch never reaches the worktree carve-out"
-  pass "a relaunch against an Orca-backed task is refused before the RELAUNCH+orca worktree carve-out could run"
+test_orca_relaunch_refuses_a_live_terminal() {
+  local id=orca-live-a2 out status before
+  orca_reclaim_case live "$id"
+  printf 'term-old\n' > "$RC_DIR/orca/live"
+  before=$(cat "$RC_HOME/state/$id.meta")
+  out=$(orca_reclaim_run "$SPAWN" "$id" --relaunch)
+  status=$?
+  expect_code 1 "$status" "a relaunch over a live Orca terminal must refuse"$'\n'"$out"
+  assert_contains "$out" "still live" "the refusal should say the recorded terminal is still live"
+  [ "$(cat "$RC_HOME/state/$id.meta")" = "$before" ] || fail "a refused relaunch changed the record"
+  grep -q '^terminal create' "$RC_DIR/orca/log" && fail "a refused relaunch created a terminal"
+  pass "Orca relaunch: a recorded terminal that is still live refuses with the record untouched"
+}
+
+test_orca_relaunch_refuses_an_unreachable_runtime() {
+  local id=orca-down-a3 out status
+  orca_reclaim_case down "$id"
+  touch "$RC_DIR/orca/runtime-down"
+  out=$(orca_reclaim_run "$SPAWN" "$id" --relaunch)
+  status=$?
+  expect_code 1 "$status" "a relaunch with an unreachable Orca runtime must refuse"$'\n'"$out"
+  [ "$(orca_meta "$id" terminal)" = term-old ] || fail "a refused relaunch rebound the record"
+  grep -q '^terminal create' "$RC_DIR/orca/log" && fail "a refused relaunch created a terminal"
+  pass "Orca relaunch: an unreachable runtime is never read as a gone terminal"
+}
+
+test_orca_relaunch_refuses_an_unreadable_inventory() {
+  local id=orca-list-a4 out status
+  orca_reclaim_case listfail "$id"
+  touch "$RC_DIR/orca/list-fails"
+  out=$(orca_reclaim_run "$SPAWN" "$id" --relaunch)
+  status=$?
+  expect_code 1 "$status" "a relaunch whose terminal inventory fails must refuse"$'\n'"$out"
+  grep -q '^terminal create' "$RC_DIR/orca/log" && fail "a refused relaunch created a terminal"
+  pass "Orca relaunch: a failed terminal inventory refuses rather than proving absence"
+}
+
+test_orca_relaunch_refuses_a_missing_worktree() {
+  local id=orca-nowt-a5 out status
+  orca_reclaim_case nowt "$id"
+  rm -f "$RC_DIR/orca/known-wt"
+  git -C "$RC_PROJ" worktree remove --force "$RC_WT"
+  out=$(orca_reclaim_run "$SPAWN" "$id" --relaunch)
+  status=$?
+  expect_code 1 "$status" "a relaunch whose worktree is gone must refuse"$'\n'"$out"
+  grep -q '^terminal create' "$RC_DIR/orca/log" && fail "a refused relaunch created a terminal"
+  [ ! -e "$RC_DIR/orca/worktree-created" ] || fail "a refused relaunch created a worktree"
+  pass "Orca relaunch: a recorded worktree that no longer exists refuses and never creates a new one"
+}
+
+test_orca_relaunch_adopts_the_worktree_a_redeployed_runtime_forgot() {
+  local id=orca-adopt-a6 out status
+  orca_reclaim_case adopt "$id"
+  # A redeployed runtime: an empty registry, the project unregistered, and
+  # the git worktree still on disk.
+  rm -f "$RC_DIR/orca/known-wt" "$RC_DIR/orca/repo-registered"
+  out=$(orca_reclaim_run "$SPAWN" "$id" --relaunch)
+  status=$?
+  expect_code 0 "$status" "a relaunch should adopt the on-disk worktree a redeployed runtime forgot"$'\n'"$out"
+  grep -q '^repo add' "$RC_DIR/orca/log" || fail "the project was not registered again"
+  [ "$(orca_meta "$id" orca_worktree_id)" = "repo2::$RC_WT" ] || fail "the record did not rebind the worktree id: $(orca_meta "$id" orca_worktree_id)"
+  [ "$(orca_meta "$id" terminal)" = term-new ] || fail "the record did not rebind terminal="
+  [ ! -e "$RC_DIR/orca/worktree-created" ] || fail "an adoption created a new Orca worktree"
+  pass "Orca relaunch: a worktree a redeployed runtime forgot is re-registered by path and adopted, never re-created"
+}
+
+test_orca_relaunch_refuses_to_adopt_a_non_worktree_path() {
+  local id=orca-noadopt-a7 out status
+  orca_reclaim_case noadopt "$id"
+  rm -f "$RC_DIR/orca/known-wt" "$RC_DIR/orca/repo-registered"
+  # The recorded path is a plain directory now, not a worktree of the project.
+  git -C "$RC_PROJ" worktree remove --force "$RC_WT"
+  mkdir -p "$RC_WT"
+  out=$(orca_reclaim_run "$SPAWN" "$id" --relaunch)
+  status=$?
+  expect_code 1 "$status" "a relaunch must not adopt a path that is not a worktree of the project"$'\n'"$out"
+  grep -q '^repo add' "$RC_DIR/orca/log" && fail "an unadoptable path still registered the project"
+  grep -q '^terminal create' "$RC_DIR/orca/log" && fail "a refused adoption created a terminal"
+  pass "Orca relaunch: a forgotten worktree id over a path that is not a linked worktree of the project refuses"
+}
+
+test_orca_control_relaunch_reclaims_and_keeps_exit_refusing() {
+  local id=orca-ctl-a8 out status
+  orca_reclaim_case control "$id"
+  out=$(orca_reclaim_run "$ROOT/bin/fm-control.sh" "$id" exit)
+  status=$?
+  expect_code 1 "$status" "exit on Orca stays refused"$'\n'"$out"
+  assert_contains "$out" "no recovery-grade agent-state classifier" "exit on Orca should keep its classifier refusal"
+  printf 'term-old\n' > "$RC_DIR/orca/live"
+  out=$(orca_reclaim_run "$ROOT/bin/fm-control.sh" "$id" relaunch --note "box restarted")
+  status=$?
+  expect_code 1 "$status" "fm-control relaunch over a live Orca terminal must refuse"$'\n'"$out"
+  assert_contains "$out" "refusing before anything is touched" "the live-terminal refusal should precede the checkpoint"
+  assert_not_contains "$(cat "$RC_HOME/data/$id/brief.md")" "box restarted" "a refused relaunch appended its note"
+  : > "$RC_DIR/orca/live"
+  out=$(orca_reclaim_run "$ROOT/bin/fm-control.sh" "$id" relaunch --note "box restarted")
+  status=$?
+  expect_code 0 "$status" "fm-control relaunch should reclaim a gone Orca terminal"$'\n'"$out"
+  assert_contains "$out" "relaunched $id" "the relaunch should report success"
+  [ "$(orca_meta "$id" terminal)" = term-new ] || fail "fm-control relaunch did not rebind terminal="
+  assert_contains "$(cat "$RC_HOME/data/$id/brief.md")" "box restarted" "the progress note did not reach the brief"
+  [ "$(grep '^exit_result=' "$RC_HOME/state/$id.control-relaunch" | tail -1 | cut -d= -f2-)" = endpoint-gone ] \
+    || fail "the journal should record that the endpoint was already gone"
+  pass "Orca control relaunch: refuses a live terminal before the checkpoint, reclaims a gone one with the note, exit unchanged"
 }
 
 # Source values are synthetic and deliberately include shell syntax and trailing
@@ -879,6 +1128,13 @@ test_orca_launch_file_delete_failure_keeps_terminal
 test_orca_pane_wins_launch_file_race_at_deadline
 test_orca_snapshot_keeps_raw_bytes_tmux_reports
 test_orca_fresh_spawn_enters_the_worktree_it_created
-test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run
+test_orca_relaunch_rebinds_a_terminal_proven_gone
+test_orca_relaunch_refuses_a_live_terminal
+test_orca_relaunch_refuses_an_unreachable_runtime
+test_orca_relaunch_refuses_an_unreadable_inventory
+test_orca_relaunch_refuses_a_missing_worktree
+test_orca_relaunch_adopts_the_worktree_a_redeployed_runtime_forgot
+test_orca_relaunch_refuses_to_adopt_a_non_worktree_path
+test_orca_control_relaunch_reclaims_and_keeps_exit_refusing
 
 echo "# all fm-spawn-orca-worktree tests passed"

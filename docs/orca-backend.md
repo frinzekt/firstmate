@@ -70,6 +70,14 @@ It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
 
+`fm-control.sh <task> relaunch` reclaims an Orca task only when its recorded terminal is proven gone, such as after the host restarts and its terminals die while the worktree survives.
+Orca cannot classify or stop a live agent, so `exit` stays refused and a terminal still listed refuses `relaunch` before anything is touched.
+The proof and its refusals are owned by [`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone".
+A relaunch opens one new terminal in the recorded worktree, rebinds `terminal=`, and keeps the task, its instructions, and its progress note; it never creates a worktree.
+When a redeployed Orca server no longer knows the recorded worktree id, the recorded path is adopted only if it is still a linked git worktree of the recorded project, by registering the project again and rebinding `orca_worktree_id=` to the id Orca now reports for that path.
+
+`FM_ORCA_BIN` names the Orca CLI to run instead of `orca` on the path, for a host whose CLI lives inside an Orca-deployed data directory; that CLI may also need `ORCA_USER_DATA_PATH` exported.
+
 ## Active limits
 
 - Orca is macOS-only and explicit-only.
