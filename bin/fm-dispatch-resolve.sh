@@ -3,7 +3,7 @@
 # profile from a task brief with a configurable model provider, opt-in.
 #
 # Usage:
-#   fm-dispatch-resolve.sh <brief-file> [--project <name>]
+#   fm-dispatch-resolve.sh <brief-file> [--project <name>] [--rule <rule_N|default>]
 #   fm-dispatch-resolve.sh --supports-credential-source <source>
 #
 # Opt-in gate: FM_DISPATCH_PROVIDER and FM_DISPATCH_MODEL select the provider
@@ -36,6 +36,17 @@
 #   declared source this host cannot run, or that yields no key within
 #   5 seconds, is an error outcome ending "nothing sent", with no network or
 #   quota call, so it is not mistaken for an unconfigured resolver.
+#
+# Caller-matched rule: --rule <rule_N|default> names the rule firstmate itself
+#   matched, where rule_N is the Nth entry of the rules array (the same id the
+#   output prints) and default means no listed rule applies. The tool then makes
+#   no provider call and needs no key or provider setting: it takes that choice
+#   as certain and applies every declared gate below - approval, floors, quota
+#   evidence, preferred_provider, and spendPriority - exactly as for a model
+#   answer, so a clear result is recorded for fm-spawn.sh like any other. It is
+#   the path for a home whose provider is off. A rule_N outside the rules array
+#   or any other value is a usage error (exit 2); --rule default resolves the
+#   configured default even when the file has no rules.
 #
 # Capability probe: --supports-credential-source <source> prints "supported"
 #   and exits 0, or prints "unsupported" and exits 1, for a source name such as
@@ -205,12 +216,13 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
+BRIEF='' PROJECT='' RULE_CHOICE='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
 CRED_PATH="$CONFIG/dispatch-credential-sources.json"
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
+    --rule) { [ $# -ge 2 ] && [ -n "$2" ]; } || die "--rule needs a value"; RULE_CHOICE=$2; shift 2 ;;
     --supports-credential-source)
       [ $# -ge 2 ] || die "--supports-credential-source needs a value"
       if fm_credsrc_supported "$2"; then echo supported; exit 0; fi
@@ -271,7 +283,7 @@ select_key() {
   [ -n "${!var}" ] || printf -v "$var" '%s' "$(fmx_env_get "$name" "$FM_HOME/.env")"
   [ -n "${!var}" ] || declared_key "$provider" "$var"
   if [ -z "${!var}" ]; then
-    resolver_off "$name absent from the environment and $FM_HOME/.env"
+    resolver_off "$name absent from the environment and $FM_HOME/.env; pass --rule <rule_N|default> to resolve your own rule match without a provider"
   fi
 }
 
@@ -308,6 +320,15 @@ select_typesafe_base() {
   TS_BASE=$base
 }
 
+case "$RULE_CHOICE" in
+  ''|default) ;;
+  rule_[1-9]|rule_[1-9]*[0-9]) case "${RULE_CHOICE#rule_}" in *[!0-9]*) die "--rule must be rule_N or default" ;; esac ;;
+  *) die "--rule must be rule_N or default" ;;
+esac
+if [ -n "$RULE_CHOICE" ]; then
+  # The caller supplied the match: no provider, key, or request is involved.
+  DISPATCH_PROVIDER=caller DISPATCH_MODEL="none (--rule $RULE_CHOICE)" ENDPOINT='' TIMEOUT='' KEY_PRIVATE=''
+else
 DISPATCH_PROVIDER=${FM_DISPATCH_PROVIDER:-}
 [ -n "$DISPATCH_PROVIDER" ] || DISPATCH_PROVIDER=$(fmx_env_get FM_DISPATCH_PROVIDER "$FM_HOME/.env")
 DISPATCH_MODEL=${FM_DISPATCH_MODEL:-}
@@ -345,7 +366,7 @@ case "$DISPATCH_PROVIDER" in
     [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openai"
     [ -n "$OPENAI_API_KEY_PRIVATE" ] || OPENAI_API_KEY_PRIVATE=$(fmx_env_get OPENAI_API_KEY "$FM_HOME/.env")
     if [ -z "$OPENAI_API_KEY_PRIVATE" ]; then
-      resolver_off "OPENAI_API_KEY absent from the environment and $FM_HOME/.env"
+      resolver_off "OPENAI_API_KEY absent from the environment and $FM_HOME/.env; pass --rule <rule_N|default> to resolve your own rule match without a provider"
     fi
     ;;
   *) die "unknown FM_DISPATCH_PROVIDER: $DISPATCH_PROVIDER (expected typesafe, openrouter, systemone, or openai)" ;;
@@ -356,6 +377,7 @@ case "$DISPATCH_PROVIDER" in
   systemone) ENDPOINT=$DISPATCH_BASE_URL/v1/systemone TIMEOUT=$SO_TIMEOUT KEY_PRIVATE=$DISPATCH_API_KEY_PRIVATE ;;
   openai) ENDPOINT=$OA_BASE/v1/decisions TIMEOUT=$OA_TIMEOUT KEY_PRIVATE=$OPENAI_API_KEY_PRIVATE ;;
 esac
+fi
 export -n KEY_PRIVATE 2>/dev/null || true
 
 # ---- inputs --------------------------------------------------------------------
@@ -463,7 +485,10 @@ done < <(jq -r '
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
-if [ "$RULE_COUNT" -eq 0 ]; then
+if [ -n "$RULE_CHOICE" ] && [ "$RULE_CHOICE" != default ] && [ "${RULE_CHOICE#rule_}" -gt "$RULE_COUNT" ]; then
+  die "--rule $RULE_CHOICE is not in $RULES_PATH ($RULE_COUNT rule(s))"
+fi
+if [ "$RULE_COUNT" -eq 0 ] && [ "$RULE_CHOICE" != default ]; then
   no_rules
 fi
 
@@ -527,13 +552,22 @@ task_sections() {
     printf '%s\n%s\n\n' "$heading" "$(fm_brief_task_heading_body "$BRIEF" "$heading")"
   done
 }
+LAT_MS=null
+if [ -n "$RULE_CHOICE" ]; then
+  # A certain answer in the provider's own shape, so every gate below applies
+  # unchanged.
+  jq -n --arg choice "$RULE_CHOICE" --arg model "$DISPATCH_MODEL" --slurpfile rules "$RULES" '
+    ((($rules[0].rules // []) | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"]) as $choices |
+    {model: $model, answers: {rule: {choice: $choice, confidence: 1,
+      probabilities: ($choices | map({key: ., value: (if . == $choice then 1 else 0 end)}) | from_entries)}}}' \
+    > "$RESP_FILE" || emit_error "could not record the --rule choice"
+else
 SECTIONS=$(task_sections)
 if [ -n "$SECTIONS" ]; then
   { brief_kind; printf '%s\n' "$SECTIONS"; } > "$TASK_TEXT" || die "could not read brief: $BRIEF"
 else
   cp "$BRIEF" "$TASK_TEXT" || die "could not read brief: $BRIEF"
 fi
-LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$DISPATCH_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
@@ -612,8 +646,9 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       emit_error "response is not a rule Choice answer"
     fi
   fi
+fi
 jq -e --slurpfile rules "$RULES" '
-    (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
+    ((($rules[0].rules // []) | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and

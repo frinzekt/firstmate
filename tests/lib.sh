@@ -59,6 +59,11 @@ export FM_TEST_SEAM=1
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
 
+# Keep fixture PATH stubs ahead of the captain's real tools: bin/fm-spawn.sh
+# otherwise rebuilds PATH from a fresh login shell on every launch
+# (bin/fm-login-path-lib.sh). A case that tests the refresh sets it back.
+export FM_SPAWN_LOGIN_PATH=0
+
 # Clear the launcher identity, terminal marker, runtime-backend selector, and
 # home/state overrides a suite inherits from the terminal that started it. A
 # session running inside herdr exports HERDR_ENV/HERDR_PANE_ID/HERDR_SOCKET_PATH/...

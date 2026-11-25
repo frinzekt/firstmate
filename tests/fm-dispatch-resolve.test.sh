@@ -759,7 +759,7 @@ reset_log
 run code out err "$BRIEF" --project pager
 HOME_DIR=$PRIMARY_HOME
 assert_equals '' "$out" "a declaration in another home is not consulted"
-assert_contains "$err" "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $OTHER_HOME/.env)" "a home with no declaration is off"
+assert_contains "$err" "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $OTHER_HOME/.env; pass --rule <rule_N|default> to resolve your own rule match without a provider)" "a home with no declaration is off"
 assert_absent "$LOG/security.argv" "another home's declaration is never read"
 EFFECTIVE_CONFIG="$TMP_ROOT/effective-config"
 mkdir -p "$EFFECTIVE_CONFIG"
@@ -941,7 +941,7 @@ FM_DISPATCH_BASE_URL=http://127.0.0.1:8080 FM_DISPATCH_API_KEY=unused OPENAI_API
   OPENROUTER_API_KEY=unused run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "config-absent off exits 0"
 assert_equals '' "$out" "config-absent off prints nothing on stdout"
-assert_equals "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $HOME_DIR/.env)" "$err" \
+assert_equals "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $HOME_DIR/.env; pass --rule <rule_N|default> to resolve your own rule match without a provider)" "$err" \
   "config-absent off is the original single stderr line, byte for byte"
 assert_absent "$LOG/argv" "config-absent off makes no network call"
 assert_absent "$LOG/quota-axi.calls" "config-absent off reads no quota"
@@ -1037,7 +1037,7 @@ reset_log
 FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna run code out err "$BRIEF"
 expect_code 0 "$code" "openai without a key exits 0"
 assert_equals '' "$out" "openai without a key prints nothing on stdout"
-assert_equals "dispatch-resolve: off (OPENAI_API_KEY absent from the environment and $HOME_DIR/.env)" "$err" "openai without a key is one off line"
+assert_equals "dispatch-resolve: off (OPENAI_API_KEY absent from the environment and $HOME_DIR/.env; pass --rule <rule_N|default> to resolve your own rule match without a provider)" "$err" "openai without a key is one off line"
 assert_absent "$LOG/argv" "openai without a key makes no network call"
 reset_log
 FM_DISPATCH_PROVIDER=openai OPENAI_API_KEY=$OA_KEY run code out err "$BRIEF"
@@ -2073,5 +2073,54 @@ assert_not_contains "$out" 'quota ranking off' "shared_quota false prints no opt
 assert_contains "$out" 'spendPriority=' "shared_quota false prints quota evidence"
 pass "shared_quota false keeps the unchanged quota-ranked behavior"
 cp "$BASE_RULES" "$RULES"
+
+# --- --rule: the caller's own match, with no provider, key, or request -------
+cp "$BASE_RULES" "$RULES"
+write_quota "$QUOTA" 0.7597
+rm -f "$HOME_DIR/.env"
+reset_log
+run code out err "$BRIEF" --project pager
+assert_contains "$err" 'pass --rule <rule_N|default> to resolve your own rule match without a provider)' \
+  "the off line points at --rule"
+reset_log
+FM_DISPATCH_PROVIDER=bogus run code out err "$BRIEF" --project pager --rule rule_4
+expect_code 0 "$code" "--rule ignores the provider setting entirely: $err"
+assert_contains "$out" '  status: clear' "--rule with no key resolves clear when the declared gates pass"
+assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 1' \
+  "--rule reports the caller's rule as a certain answer"
+assert_contains "$out" '  model: none (--rule rule_4)' "--rule names its source instead of a model"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" \
+  "--rule still ranks the rule's candidates by quota evidence"
+assert_absent "$LOG/argv" "--rule never calls curl"
+[ -f "$LOG/quota-axi.calls" ] || fail "--rule still reads quota-axi"
+reset_log
+run code out err "$TASK_BRIEF" --project pager --rule default
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "--rule default ranks the configured default's candidates"
+assert_equals 'clear cursor' "$(jq -r '"\(.status) \(.profile.harness)"' "$TASK_RECORD")" \
+  "--rule records a clear resolution fm-spawn.sh accepts"
+reset_log
+run code out err "$BRIEF" --project pager --rule rule_3
+assert_contains "$out" '  status: escalate' "--rule keeps the captain-approval gate"
+assert_not_contains "$out" '  profile:' "an approval-gated --rule emits no profile"
+for bad in rule_5 rule_0 rule_01 rule_2x default2 ''; do
+  reset_log
+  run code out err "$BRIEF" --project pager --rule "$bad"
+  expect_code 2 "$code" "--rule '$bad' is a usage error"
+  assert_equals '' "$out" "--rule '$bad' prints nothing on stdout"
+  assert_absent "$LOG/quota-axi.calls" "--rule '$bad' reads no quota"
+done
+printf '{"default": {"harness": "claude", "model": "opus"}}\n' > "$RULES"
+reset_log
+run code out err "$BRIEF" --project pager --rule default
+assert_contains "$out" "  profile: --harness 'claude' --model 'opus'" "--rule default resolves a default-only file"
+reset_log
+run code out err "$BRIEF" --project pager --rule rule_1
+expect_code 2 "$code" "--rule rule_1 against a file with no rules is a usage error"
+printf '{"rules": [' > "$RULES"
+reset_log
+run code out err "$BRIEF" --project pager --rule default
+expect_code 2 "$code" "--rule never selects around a malformed rules file"
+cp "$BASE_RULES" "$RULES"
+pass "--rule resolves the caller's match through every declared gate with no provider call"
 
 printf '# all fm-dispatch-resolve tests passed\n'

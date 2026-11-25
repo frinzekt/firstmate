@@ -1890,6 +1890,14 @@ The file is inherited into secondmate homes through the [primary-authoritative c
 
 Changes apply to subsequent launches; existing processes keep their environment.
 
+### Launch PATH refresh
+
+Every launch, with or without the allowlist, first rebuilds `PATH` from a fresh interactive login shell (`$SHELL -ilc`, started from a cleared environment), so a tool installed or upgraded since Firstmate started - such as a new Node version under nvm - is found by the launch and by the worker.
+The login shell's entries come first, followed by the inherited entries that still exist as directories, so a removed directory drops out and a deliberate inherited addition stays reachable.
+A pane launch exports that `PATH` into the pane shell before the launch command; T3 Code keeps the provider environment T3 owns, and an [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) that lists `PATH` still supplies the agent's value.
+The login shell is bounded by `FM_SPAWN_LOGIN_PATH_TIMEOUT` seconds (default 10); a shell that fails, exceeds the bound, or reports no usable `PATH` prints one `warning: login-shell PATH refresh failed (...)` line and the launch keeps the inherited `PATH`.
+Set `FM_SPAWN_LOGIN_PATH=0` in the environment that runs `bin/fm-spawn.sh` to turn the refresh off; `bin/fm-login-path-lib.sh` owns the probe and the merge.
+
 ### Allowlist format
 
 Create the file with one environment variable **name** per line, never credential values, assignments, wildcards, or shell commands.
@@ -2171,6 +2179,9 @@ To select a gateway-specific model ID, set `FM_DISPATCH_PROVIDER=typesafe` and `
 The selected provider needs a non-empty key from the environment, else `.env`, else, for `typesafe` and `openrouter` only, the credential source the home declares for that provider; `systemone` is the exception, where an absent `FM_DISPATCH_API_KEY` means the request carries no `Authorization` header.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
+When the provider is off, firstmate still matches the brief against the rules itself and records that match with `--rule rule_N` (the Nth rule, the id the output prints) or `--rule default` (no listed rule applies).
+That run sends nothing and needs no key or provider setting; it takes the named choice as certain and applies every declared gate below - approval, floors, quota evidence, `preferred_provider`, and spendPriority - so a `clear` result is recorded and accepted by `fm-spawn.sh` without `--dispatch-override`, and every other status means the intake as usual.
+A `rule_N` outside the rules array, or any other value, is a usage error.
 A declared credential source that cannot supply its key is not off; see "Credential source declaration" below.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared top-level, rule, and profile fields it applies.
 
@@ -2178,6 +2189,7 @@ Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFI
 
 ```sh
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
+bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name> --rule default   # your own match, no provider call
 ```
 
 **When firstmate invokes the resolver**

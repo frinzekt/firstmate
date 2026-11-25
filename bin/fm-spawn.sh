@@ -445,6 +445,17 @@
 #   On backend=orca the destination is an Orca terminal whose environment comes
 #   from the Orca app and shell startup, not this home, so a nonempty allowlist
 #   without the source below prints a stderr warning and launches unchanged.
+# Launch PATH refresh: every launch (ship, scout, secondmate, and relaunch)
+#   first replaces this process's PATH with the one a fresh interactive login
+#   shell builds, followed by the inherited entries that still exist, so the
+#   harness lookup and the worker see tools installed or upgraded since
+#   firstmate started. A pane launch then exports that PATH into the pane shell
+#   before the launch command; T3 Code, whose provider process environment T3
+#   owns, keeps its own. An Orca environment source that names PATH below
+#   still supplies the agent's PATH. A shell that fails or exceeds the bound
+#   prints one warning line and the launch keeps the inherited PATH.
+#   FM_SPAWN_LOGIN_PATH=0 turns the refresh off; bin/fm-login-path-lib.sh owns
+#   the probe, its bound (FM_SPAWN_LOGIN_PATH_TIMEOUT), and the merge.
 # Orca environment source (config/launch-env-tmux-session):
 #   Optional local file containing one exact tmux session name (letters, digits,
 #   underscores or hyphens). Only fresh Orca spawns use it; other backends are
@@ -984,6 +995,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-herdr-identity-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-login-path-lib.sh
+. "$SCRIPT_DIR/fm-login-path-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
@@ -3234,6 +3247,10 @@ launch_template() {
   *) return 1 ;;
   esac
 }
+
+# Refresh PATH once, before any harness or backend executable is resolved
+# (header "Launch PATH refresh").
+fm_login_path_refresh
 
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
@@ -7972,6 +7989,11 @@ else
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# The refreshed launch PATH (header "Launch PATH refresh") replaces whatever
+# PATH the pane shell inherited from its backend, which can predate an install.
+if [ "$FM_LOGIN_PATH_REFRESHED" = 1 ]; then
+  spawn_send_text_line "$T" "export PATH=$(shell_quote "$PATH")"
+fi
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
