@@ -30,12 +30,12 @@ FLEET · 1 busy · 9 paused
   ▰▰▰▰▰▰▰▰▰▱ ~91% 184k  ~$3.33
 
 ◌ ci-e2e-parallel-setup ship                           paused 2d
-  flapuz/NOISSUE
+  alice/NOISSUE
   waiting on captain merge (risk form + approval) of PR
   ▰▰▰▰▰▰▰▰▰▰ ~97% 195k  ~$7.32
 
 ◌ ci-spark-driver-heap ship                            paused 2d
-  flapuz/NOISSUE
+  alice/NOISSUE
   waiting on captain merge (risk form + approval) of PR
   ▰▰▰▰▰▰▰▱▱▱ ~69% 138k  ~$3.29
 

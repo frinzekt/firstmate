@@ -147,7 +147,7 @@ describe("inline cost breakdown", () => {
     task: "t", project: "p", model: "", effort: "", outcome: "cleaned_up", via: null, endedAt: NOW - 60, durationS: null,
     spendTokens: null, spendUnknown: 0, costUsd: null, tokens: null, costExact: false, breakdown: null, subagents: [], byModel: [], kind: "ship", pr: "",
   };
-  const BB = "https://bitbucket.org/atlassian/ml-feature-store/pull-requests/3361";
+  const BB = "https://bitbucket.org/acme/widgets/pull-requests/3361";
 
   test("outcome label: merged #N, closed #N, PR #N, report, no PR", () => {
     expect(prNumber(BB)).toBe("#3361");

@@ -62,7 +62,7 @@ test_window_percent_title() {
   assert_eq "$(fm_pulse_percent 300000 200000)" 100 "percent is capped"
   assert_eq "$(fm_pulse_percent '' 200000)" "" "unknown tokens give no percent"
   assert_eq "$(fm_pulse_title 'Fix the parser' fm/x/a a)" "Fix the parser" "ai-title wins"
-  assert_eq "$(fm_pulse_title 'Firstmate operational inbox message' fm/flapuz/MLP-1/a a)" "flapuz/MLP-1" "generic title falls back to the branch"
+  assert_eq "$(fm_pulse_title 'Firstmate operational inbox message' fm/alice/ABC-1/a a)" "alice/ABC-1" "generic title falls back to the branch"
   assert_eq "$(fm_pulse_title '' fm/a a)" "" "branch equal to the id gives nothing"
   assert_eq "$(fm_pulse_transcript_dir /Users/x/orca/ws.v/fm-a "$TMP_ROOT/p")" "$TMP_ROOT/p/-Users-x-orca-ws-v-fm-a" "transcript dir name"
   assert_eq "$(fm_pulse_price claude-opus-5-5)" "4 20 5 0.2" "opus price"

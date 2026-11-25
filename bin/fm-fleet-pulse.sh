@@ -198,7 +198,7 @@ fm_pulse_usage_cost() {
 
 # fm_pulse_title <ai-title> <branch> <id>: the card title. The transcript's ai-title unless it
 # is the generic "Firstmate operational ..." name every inbox-launched worker gets; then the
-# branch with its `fm/` prefix and trailing `/<id>` removed (`fm/flapuz/MLP-1/x` -> `flapuz/MLP-1`).
+# branch with its `fm/` prefix and trailing `/<id>` removed (`fm/alice/ABC-1/x` -> `alice/ABC-1`).
 fm_pulse_title() {
   local title=$1 branch=$2 id=$3
   case "$title" in "" | "Firstmate operational"*) title="" ;; esac

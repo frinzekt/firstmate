@@ -31,7 +31,7 @@ function worker(over: Partial<Worker> = {}): Worker {
     kind: "ship",
     harness: "claude",
     model: "claude-opus-5-5",
-    title: "flapuz/MLP-12354",
+    title: "alice/ABC-12354",
     state: "paused",
     busy: false,
     waitingOnCaptain: false,
@@ -56,7 +56,7 @@ function rawWorker(over: Record<string, unknown> = {}) {
     kind: "ship",
     harness: "claude",
     model: "claude-opus-5-5",
-    title: "flapuz/MLP-12354",
+    title: "alice/ABC-12354",
     state: "paused",
     busy: false,
     waiting_on_captain: false,
@@ -128,7 +128,7 @@ describe("cards", () => {
     const text = rowsToText(cardRows(worker(), NOW, 64));
     expect(text).toContain("◌ rtfv-d2 ship");
     expect(text).toContain("paused 2h");
-    expect(text).toContain("flapuz/MLP-12354");
+    expect(text).toContain("alice/ABC-12354");
     expect(text).toContain("Apply staging 500 server-side");
     expect(text).toContain("~54%");
     expect(text).toContain("108k");
