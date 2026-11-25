@@ -179,7 +179,10 @@ fm_backend_orca_repo_ensure() {  # <project-path>
 fm_backend_orca_worktree_create() {  # <project-path> <name>
   local project=$1 name=$2 repo_id out wt_id wt_path terminal
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
-  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json) || return 1
+  # LOCAL ONLY (never upstream): FM_ORCA_REFERENCE=<url> attaches a Jira/issue link.
+  local ref_args=()
+  [ -n "${FM_ORCA_REFERENCE:-}" ] && ref_args=(--reference "$FM_ORCA_REFERENCE")
+  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip ${ref_args[@]+"${ref_args[@]}"} --json) || return 1
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
     echo "error: orca worktree create did not return a worktree id for $name" >&2
     return 1
