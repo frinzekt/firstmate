@@ -61,6 +61,9 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   captain-held the same, but record a captain outcome before the turn ends
 #   emptyresult the same as handle, but print {} as its result
 #   noreport    drain and exit cleanly without a report
+#   denied      the same as noreport, but the success result lists a denied
+#               tool call in permission_denials (a permission policy that
+#               ignored the engine's allowlist)
 #   go-away     the captain goes away (the record is written) mid-turn, then
 #               the turn reports verdict captain
 #   fail        exit nonzero at once, with no result and no report (an engine
@@ -87,8 +90,9 @@ n=$(( $(ls "$FM_HOME"/engine-call.* 2>/dev/null | wc -l) + 1 ))
 } > "$FM_HOME/engine-call.$n"
 case "$mode" in held|captain-held) printf 'ready\n' > "$FM_HOME/stub-ready" ;; esac
 # Like Claude, the reported cost is the conversation's running total.
-result() {
+result() {  # [<permission_denials JSON array>]
   printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":%s,' "$(awk -v n="$n" 'BEGIN { print n * 0.25 }')"
+  [ -z "${1:-}" ] || printf '"permission_denials":%s,' "$1"
   printf '"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":20},"session_id":"stub"}\n'
 }
 if [ "$mode" = hang ]; then
@@ -173,6 +177,7 @@ case "$mode" in
     result
     ;;
   noreport) result ;;
+  denied) result '[{"tool_name":"Bash","tool_use_id":"toolu_stub","tool_input":{"command":"bin/fm-wake-drain.sh"}}]' ;;
 esac
 SH
 chmod +x "$STUB"

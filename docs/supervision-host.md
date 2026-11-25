@@ -280,6 +280,7 @@ So the owner's next arm starts from the same state as without the host, and the 
 - A dialog mirror that cannot be read, on an attended wake.
 - A session latched after repeated engine errors, inside its cooldown; see [The broken-session latch](#the-broken-session-latch).
 - A turn that timed out or failed.
+- A turn whose tool calls the permission layer denied; its line says the Claude permission policy denied them.
 - A turn that recorded no report.
 - A turn that reported but left any of its granted rows unacknowledged.
   Its line names those rows, which stay durable in the queue for main's drain.
@@ -289,14 +290,14 @@ When the captain returned during a failed turn that recorded visible outcomes, t
 
 ### The broken-session latch
 
-The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, or ended without a complete successful result.
+The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, ended without a complete successful result, or had any tool call denied by the permission layer.
 Two consecutive engine errors latch the session: every wake reaches main for a five-minute cooldown, the attended close unchanged and the away close with a `supervision-host:` line, after which one wake probes the engine, and each probe that ends in another engine error doubles the cooldown up to one hour.
 A turn that records a report without an engine error clears the latch; a turn with a complete engine result but no report neither counts toward it nor clears it, while an engine error counts even if no report was recorded.
 The first trip adds one `supervision-host:` line to the failing turn's handback; a recovery is only recorded in the host ledger, so a routine probe stays off main.
 The away return brief (`bin/fm-afk-return.sh`) reports engine errors in the window and any latch visible at return, using a lower bound for the window's error count because the host ledger is bounded.
 It names the trip time only when the ledger retains the initial-trip row: a failed-probe row cannot establish that time or prove the latch predated the window, and a paused latch with no initial-trip row is reported with "trip time unavailable" even if the ledger is missing.
 The brief also says whether the latch is still paused or has recovered.
-The latch belongs to one main session, engine, and model, so a new main session or another engine or model starts clean.
+The latch belongs to one main session, engine, model, and permission mode, so a new main session, another engine or model, or a changed permission mode starts clean.
 
 ### Lost ownership
 
@@ -405,8 +406,12 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 
 **Permissions**
 
-- `--permission-mode dontAsk` with the `Bash` and `Read` allowlist never prompts.
-  A denied call reaches the model as a tool error and never wedges the turn.
+- The engine runs with `--permission-mode dontAsk` by default, or `auto` when the home selects it ([configuration](configuration.md#engine-permission-mode-configsupervision-host-permission-mode)); it never runs with `bypassPermissions`.
+- `dontAsk` with the `Bash` and `Read` allowlist never prompts, and it runs the branch's commands only while Claude honors that CLI allowlist.
+  A managed policy with `allowManagedPermissionRulesOnly` ignores every non-managed allow rule, so `dontAsk` then denies every command that is not read-only.
+  `auto` decides through the organization's configured classifier instead of allow rules, so it is the option under such a policy.
+- A denied call reaches the model as a tool error and never wedges the turn.
+  The result lists it in `permission_denials`, and the host counts any denial as an engine error ([The broken-session latch](#the-broken-session-latch)).
 - `--safe-mode` does not override the user's default mode, so the mode is always passed.
 - Claude path-checks direct file reads against its working directories.
   So a home or state directory outside the code root is passed with `--add-dir`.
@@ -428,6 +433,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
   - `subtype` is `success`.
   - `is_error` is false.
   - `total_cost_usd`, `num_turns`, and the four `usage` token counts (input, cache read, cache creation, output) are finite numbers.
+  - `permission_denials` is absent or empty.
 - Any other result fails the turn and hands its wake to main.
 
 **Tool process reaping**

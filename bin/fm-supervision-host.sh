@@ -1192,6 +1192,8 @@ handle_wake() {  # <reason-lines>
     HANDLE_WHY="the $FM_SUPERVISION_ENGINE engine could not run"
   elif [ "$rc" -ne 0 ]; then
     HANDLE_WHY="the engine turn failed (exit $rc)"
+  elif printf '%s\n' "$usage" | grep -q ' denials=[1-9]'; then
+    HANDLE_WHY="the engine's tool calls were denied by the Claude permission policy"
   elif [ "${usage#error=0}" = "$usage" ]; then
     HANDLE_WHY="the engine turn ended with an error or an incomplete result"
   elif [ "${receipts:-0}" -eq 0 ]; then

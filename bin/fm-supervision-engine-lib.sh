@@ -8,10 +8,12 @@
 # main-session key (fm_supervision_host_main_key) and the attended readiness
 # check (fm_supervision_host_attended_ready) the host's parts share.
 #
-# THE HOME GATE (config/supervision-host-off, config/supervision-host).
-# docs/configuration.md "Supervision host" owns both files: the inherited
-# opt-out flag, the home-local engine line's schema, the default on a Claude
-# primary, and the no-engine outcome; this file implements them
+# THE HOME GATE (config/supervision-host-off, config/supervision-host,
+# config/supervision-host-permission-mode).
+# docs/configuration.md "Supervision host" owns these files: the inherited
+# opt-out flag, the home-local engine line's schema, the home-local Claude
+# engine permission mode, the default on a Claude primary, and the no-engine
+# outcome; this file implements them
 # (fm_supervision_host_enabled, fm_supervision_host_config) and holds the
 # verified-engine list and each engine's default model
 # (docs/supervision-host.md "Engines"). Every reader of either file asks
@@ -83,6 +85,17 @@ fm_supervision_engine_verified() {  # <engine>
   return 1
 }
 
+# The Claude engine permission modes a home may select. bypassPermissions is
+# deliberately absent: the engine never skips the permission layer.
+FM_SUPERVISION_ENGINE_PERMISSION_MODES='dontAsk auto'
+
+fm_supervision_engine_permission_mode_supported() {  # <mode>
+  case " $FM_SUPERVISION_ENGINE_PERMISSION_MODES " in
+    *" ${1:-} "*) [ -n "${1:-}" ] && return 0 ;;
+  esac
+  return 1
+}
+
 fm_supervision_engine_default_model() {  # <engine>
   case "$1" in
     claude) printf 'sonnet\n' ;;
@@ -92,15 +105,17 @@ fm_supervision_engine_default_model() {  # <engine>
 
 # fm_supervision_host_config <config-dir> <primary-harness>
 # Returns 1 when the home does not run the host (fm_supervision_host_enabled).
-# Otherwise returns 0 and sets
-# FM_SUPERVISION_ENGINE and FM_SUPERVISION_ENGINE_MODEL for a usable engine, or
-# leaves both empty and sets FM_SUPERVISION_ENGINE_PROBLEM to one plain
-# sentence naming why this home has no engine.
+# Otherwise returns 0 and sets FM_SUPERVISION_ENGINE,
+# FM_SUPERVISION_ENGINE_MODEL, and FM_SUPERVISION_ENGINE_PERMISSION_MODE for a
+# usable engine, or leaves all three empty and sets
+# FM_SUPERVISION_ENGINE_PROBLEM to one plain sentence naming why this home has
+# no engine.
 # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
 fm_supervision_host_config() {
-  local config=$1 primary=${2:-} line engine model extra
+  local config=$1 primary=${2:-} line engine model extra permission mode_file
   FM_SUPERVISION_ENGINE=''
   FM_SUPERVISION_ENGINE_MODEL=''
+  FM_SUPERVISION_ENGINE_PERMISSION_MODE=''
   FM_SUPERVISION_ENGINE_PROBLEM=''
   fm_supervision_host_enabled "$config" "$primary" || return 1
   line=
@@ -136,8 +151,30 @@ EOF
       return 0
       ;;
   esac
+  # An absent or empty permission-mode file keeps dontAsk; anything present
+  # that is not one supported mode leaves the home without an engine.
+  mode_file=$config/supervision-host-permission-mode
+  permission=''
+  if [ -e "$mode_file" ] || [ -L "$mode_file" ]; then
+    line=''
+    extra=''
+    if [ ! -f "$mode_file" ] || [ ! -r "$mode_file" ]; then
+      FM_SUPERVISION_ENGINE_PROBLEM="config/supervision-host-permission-mode is not a readable file"
+      return 0
+    fi
+    IFS= read -r line < "$mode_file" 2>/dev/null || true
+    read -r permission extra <<EOF
+$line
+EOF
+    if [ -n "$extra" ] || [ "$(grep -c . "$mode_file" 2>/dev/null)" -gt 1 ] \
+      || { [ -n "$permission" ] && ! fm_supervision_engine_permission_mode_supported "$permission"; }; then
+      FM_SUPERVISION_ENGINE_PROBLEM="config/supervision-host-permission-mode must hold one of: $FM_SUPERVISION_ENGINE_PERMISSION_MODES"
+      return 0
+    fi
+  fi
   FM_SUPERVISION_ENGINE=$engine
   FM_SUPERVISION_ENGINE_MODEL=$model
+  FM_SUPERVISION_ENGINE_PERMISSION_MODE=${permission:-dontAsk}
   return 0
 }
 
@@ -202,12 +239,15 @@ fm_supervision_host_main_key() {
 
 # fm_supervision_host_health_key <state-dir>: the key the host's
 # broken-session latch (bin/fm-supervision-host.sh, state/.supervision-host-health)
-# is kept under: the current main session, engine, and model; fails with no
-# main-session key. Needs fm_supervision_host_config first.
+# is kept under: the current main session, engine, model, and permission mode,
+# so a changed mode probes at once instead of waiting out a cooldown its
+# predecessor earned; fails with no main-session key. Needs
+# fm_supervision_host_config first.
 fm_supervision_host_health_key() {
   local key
   key=$(fm_supervision_host_main_key "$1") || return 1
-  printf '%s|%s|%s\n' "$key" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL"
+  printf '%s|%s|%s|%s\n' "$key" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" \
+    "${FM_SUPERVISION_ENGINE_PERMISSION_MODE:-dontAsk}"
 }
 
 # The latch's first cooldown in seconds: the host's initial trip sets it, and
@@ -337,10 +377,14 @@ _fm_engine_reap() {
 # run). <result-file> receives the engine's machine-readable result and
 # <error-file> its diagnostics. While the turn runs, <pid-file> (when given)
 # holds the bounded process's pid and identity, so a restarted host can stop
-# an engine its crashed predecessor left running.
+# an engine its crashed predecessor left running. The Claude engine's
+# permission mode is FM_SUPERVISION_ENGINE_PERMISSION_MODE (set by
+# fm_supervision_host_config; dontAsk when unset); an unsupported value runs
+# no engine and returns 127.
 fm_supervision_engine_turn() {
   local engine=$1 model=$2 prompt=$3 message=$4 session=$5 mode=$6 timeout=$7 result=$8 errors=$9
   local pid_file=${10:-} bin grace i ledger watched rc home_phys root_phys state_phys identity recorded
+  local permission=${FM_SUPERVISION_ENGINE_PERMISSION_MODE:-dontAsk}
   local -a args
   bin=$(fm_supervision_engine_bin "$engine" 2>"$errors") || return 127
   case "$timeout" in ''|0*|*[!0-9]*) timeout=1200 ;; esac
@@ -348,11 +392,16 @@ fm_supervision_engine_turn() {
   case "$grace" in ''|0*|*[!0-9]*) grace=30 ;; esac
   case "$engine" in
     claude)
+      if ! fm_supervision_engine_permission_mode_supported "$permission"; then
+        printf 'the claude engine permission mode %s is not one of: %s\n' \
+          "$permission" "$FM_SUPERVISION_ENGINE_PERMISSION_MODES" > "$errors"
+        return 127
+      fi
       # The prompt is the first positional argument, ahead of the variadic
       # tool and directory options that would otherwise absorb it.
       # shellcheck disable=SC2054 # Bash,Read is one --tools value.
       args=(-p "$(cat "$message")" --safe-mode --system-prompt-file "$prompt"
-        --tools Bash,Read --permission-mode dontAsk --allowedTools Bash Read
+        --tools Bash,Read --permission-mode "$permission" --allowedTools Bash Read
         --model "$model" --output-format json)
       root_phys=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root_phys=$FM_ROOT
       home_phys=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_phys=$FM_HOME
@@ -413,14 +462,18 @@ fm_supervision_engine_turn() {
 
 # fm_supervision_engine_result <engine> <result-file> [<prior-conversation-cost>]:
 # print one line "error=0|1 cost=<usd> conversation_cost=<usd> input=<n>
-# cache_read=<n> cache_write=<n> output=<n> turns=<n>" from the engine's
+# cache_read=<n> cache_write=<n> output=<n> turns=<n> denials=<n>" from the engine's
 # machine-readable result, where cost is this turn's and conversation_cost the
 # conversation's running total (the caller records it and passes it back for
 # the next turn; 0 for a new conversation). Claude's total_cost_usd is that
 # running total on a resumed conversation, while its usage and num_turns are
 # per turn. error=0 only for a complete success result: type "result",
 # subtype "success", is_error false, and finite total_cost_usd, num_turns, and
-# the four usage token counts; any other shape is error=1. Returns 1 when the
+# the four usage token counts, with no permission denials; any other shape is
+# error=1. denials counts the result's permission_denials entries: a tool call
+# the permission layer denied (for example under a managed-rules-only policy
+# that ignores the engine's allowlist) leaves the wake unhandled, so the latch
+# must count it as an engine error. Returns 1 when the
 # result cannot be read. The host treats both as a failed turn.
 fm_supervision_engine_result() {
   case "$1" in
@@ -437,12 +490,13 @@ fm_supervision_engine_result() {
         const complete = j.type === "result" && j.subtype === "success" && j.is_error === false
           && finite(j.total_cost_usd) && finite(j.num_turns) && finite(u.input_tokens)
           && finite(u.cache_read_input_tokens) && finite(u.cache_creation_input_tokens) && finite(u.output_tokens);
-        const error = complete ? 0 : 1;
+        const denials = Array.isArray(j.permission_denials) ? j.permission_denials.length : 0;
+        const error = complete && denials === 0 ? 0 : 1;
         const total = n(j.total_cost_usd);
         const prior = Number(process.argv[2]);
         const turn = Number.isFinite(prior) && prior >= 0 && prior <= total ? total - prior : total;
         const usd = (v) => Number(v.toFixed(6));
-        process.stdout.write(`error=${error} cost=${usd(turn)} conversation_cost=${usd(total)} input=${n(u.input_tokens)} cache_read=${n(u.cache_read_input_tokens)} cache_write=${n(u.cache_creation_input_tokens)} output=${n(u.output_tokens)} turns=${n(j.num_turns)}\n`);
+        process.stdout.write(`error=${error} cost=${usd(turn)} conversation_cost=${usd(total)} input=${n(u.input_tokens)} cache_read=${n(u.cache_read_input_tokens)} cache_write=${n(u.cache_creation_input_tokens)} output=${n(u.output_tokens)} turns=${n(j.num_turns)} denials=${denials}\n`);
       ' "$2" "${3:-0}" 2>/dev/null
       ;;
     *) return 1 ;;

@@ -916,6 +916,40 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
 
+test_permission_denied_turn_is_an_engine_error_handed_to_main() {
+  local home
+  home=$(make_home away-denied away)
+  echo denied > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "denied: the host never started a watcher cycle"
+  append_status "$home" 'needs a bin/fm command'
+  wait_until_deadline 60 host_exited "$home" || fail "denied: the host did not hand the wake to main: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "a handed-back wake must exit 0 for the owner to deliver"
+  assert_re "^supervision-host: .*the engine's tool calls were denied by the Claude permission policy; this wake is yours\$" "$home/host.out" \
+    "the handback must say the permission policy denied the engine's tool calls"
+  assert_re '	failed	turn=.*	error=1 .* denials=1	' "$home/state/.supervision-host.log" \
+    "the ledger must record the denied turn as an engine error with its denial count"
+  assert_no_re '	handled	turn=' "$home/state/.supervision-host.log" "a denied turn must never count as handled"
+  assert_re '^errors=1$' "$home/state/.supervision-host-health" "the broken-session latch must count a denied turn as an engine error"
+  pass "host: an engine turn whose tool calls were denied is an engine error that hands its wake to main with the reason"
+}
+
+test_configured_auto_permission_mode_reaches_the_engine() {
+  local home first
+  home=$(make_home away-auto away)
+  printf 'auto\n' > "$home/config/supervision-host-permission-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "auto: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 || fail "auto: the wake was not handled: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  first="$home/engine-call.1"
+  assert_re '^arg=--permission-mode$' "$first" "the engine must always be given its permission mode"
+  assert_re '^arg=auto$' "$first" "a home that selects auto must run the engine in auto mode"
+  assert_no_re '^arg=(dontAsk|bypassPermissions)$' "$first" "a home that selects auto must not run the engine in another mode"
+  assert_re '^arg=--allowedTools$' "$first" "auto mode keeps the engine's tool allowlist"
+  pass "host: config/supervision-host-permission-mode auto runs the engine in auto mode"
+}
+
 fm_test_run \
   test_park_exit_probe_uses_half_second_child_sleeps \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
@@ -945,4 +979,6 @@ fm_test_run \
   test_next_host_clears_a_turn_its_killed_predecessor_left \
   test_report_without_acknowledgement_hands_the_wake_to_main \
   test_return_during_a_failed_turn_still_hands_its_outcomes_to_main \
-  test_incomplete_engine_result_hands_the_wake_to_main
+  test_incomplete_engine_result_hands_the_wake_to_main \
+  test_permission_denied_turn_is_an_engine_error_handed_to_main \
+  test_configured_auto_permission_mode_reaches_the_engine

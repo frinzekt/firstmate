@@ -578,6 +578,56 @@ test_unverified_engine_hands_every_away_wake_to_main() {
   pass "host: a home naming an unverified engine hands every away wake to main with the reason"
 }
 
+test_unsupported_permission_mode_hands_every_away_wake_to_main() {
+  local home
+  home=$(make_home bad-permission away)
+  printf 'bypassPermissions\n' > "$home/config/supervision-host-permission-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "bad permission mode: the host never started a watcher cycle"
+  append_status "$home" 'anything'
+  wait_until_deadline 60 host_exited "$home" || fail "bad permission mode: the wake did not reach main"
+  assert_re "^supervision-host: no supervision engine runs here: config/supervision-host-permission-mode must hold one of: dontAsk auto" \
+    "$home/host.out" "an unsupported permission mode must be named on the wake it hands to main"
+  ! ls "$home"/engine-call.* >/dev/null 2>&1 || fail "bad permission mode: an engine ran"
+  pass "host: a home naming an unsupported engine permission mode hands every away wake to main with the reason"
+}
+
+# fm_supervision_host_config reads config/supervision-host-permission-mode:
+# absent or empty keeps dontAsk, dontAsk or auto selects that mode, and any
+# other content leaves the home without an engine.
+test_permission_mode_config_accepts_only_dontask_and_auto() {
+  local config="$TMP_ROOT/permission-mode-config" got bad
+  mkdir -p "$config"
+  : > "$config/supervision-host"
+  probe() {
+    # The positional parameters belong to the nested shell.
+    # shellcheck disable=SC2016
+    bash -c '. "$1"; fm_supervision_host_config "$2" claude
+      printf "%s|%s|%s" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_PERMISSION_MODE" "$FM_SUPERVISION_ENGINE_PROBLEM"' \
+      _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$config"
+  }
+  got=$(probe); [ "$got" = 'claude|dontAsk|' ] || fail "an absent permission-mode file must keep dontAsk: $got"
+  : > "$config/supervision-host-permission-mode"
+  got=$(probe); [ "$got" = 'claude|dontAsk|' ] || fail "an empty permission-mode file must keep dontAsk: $got"
+  printf 'dontAsk\n' > "$config/supervision-host-permission-mode"
+  got=$(probe); [ "$got" = 'claude|dontAsk|' ] || fail "dontAsk must select dontAsk: $got"
+  printf ' auto' > "$config/supervision-host-permission-mode"
+  got=$(probe); [ "$got" = 'claude|auto|' ] || fail "auto without a trailing newline must select auto: $got"
+  for bad in bypassPermissions acceptEdits AUTO 'auto dontAsk' $'auto\ndontAsk'; do
+    printf '%s\n' "$bad" > "$config/supervision-host-permission-mode"
+    got=$(probe)
+    [ "$got" = '||config/supervision-host-permission-mode must hold one of: dontAsk auto' ] \
+      || fail "permission mode '$bad' must leave the home without an engine: $got"
+  done
+  rm -f "$config/supervision-host-permission-mode"
+  mkdir "$config/supervision-host-permission-mode"
+  got=$(probe)
+  [ "$got" = '||config/supervision-host-permission-mode is not a readable file' ] \
+    || fail "a permission-mode directory must leave the home without an engine: $got"
+  rm -rf "$config"
+  pass "host config: the engine permission mode accepts only dontAsk and auto, defaulting to dontAsk"
+}
+
 test_host_outside_the_lock_owner_stands_down() {
   local home out rc other
   home=$(make_home not-owner attended)
@@ -664,6 +714,8 @@ test_superseded_host_leaves_the_owner_untouched() {
 }
 
 fm_test_run \
+  test_permission_mode_config_accepts_only_dontask_and_auto \
+  test_unsupported_permission_mode_hands_every_away_wake_to_main \
   test_latch_trips_after_two_engine_errors_then_probes_and_recovers \
   test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes \
   test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main \
