@@ -1,0 +1,9 @@
+{
+  "name": "fmfleet",
+  "version": "1.0.0",
+  "description": "Firstmate Fleet for Claude Code: a pane showing one card per live worker (state, last status, estimated context and cost), read from the pulse file bin/fm-fleet-pulse.sh writes. Its hooks module may load through CLAUDE_CODE_ENABLE_FUNCTION_HOOKS or Claude Code's tengu_plugin_hooks_modules rollout flag, but the mod activates only when CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is exactly 1 and is otherwise a complete no-op.",
+  "author": {
+    "name": "Firstmate",
+    "url": "https://github.com/kunchenguid/firstmate"
+  }
+}
