@@ -713,6 +713,8 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
+# Local patch: keep the fleet pulse fresh in the background (5 min) for the /lookout pane.
+[ "$READ_ONLY" = 0 ] && "$SCRIPT_DIR/fm-fleet-pulse-ensure.sh" 300 >/dev/null 2>&1
 REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 
