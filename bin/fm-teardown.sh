@@ -4086,6 +4086,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
+  # LOCAL ONLY (never upstream): per-project worktree teardown hook.
+  "$SCRIPT_DIR/fm-worktree-bootstrap.sh" teardown "$PROJ" "$WT" "$ID" "$KIND" || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
@@ -4117,6 +4119,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
     teardown_scrub_scratch_copy "$WT" || exit 1
   fi
+  # LOCAL ONLY (never upstream): per-project worktree teardown hook.
+  "$SCRIPT_DIR/fm-worktree-bootstrap.sh" teardown "$PROJ" "$WT" "$ID" "$KIND" || true
   wt_pool_slot=0
   fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
